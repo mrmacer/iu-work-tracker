@@ -1,0 +1,5 @@
+import type { WorkRecord } from "./models";
+import { SAMPLE_RECORDS } from "./sample-data";
+export interface DataProvider{listWorkRecords():Promise<WorkRecord[]>;saveWorkRecord(record:WorkRecord):Promise<WorkRecord>}
+export class ApiDataProvider implements DataProvider{async listWorkRecords(){const response=await fetch("/api/records",{cache:"no-store"});if(!response.ok)throw new Error("Could not load records");return await response.json() as WorkRecord[]}async saveWorkRecord(record:WorkRecord){const response=await fetch("/api/records",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(record)});if(!response.ok)throw new Error("Could not save record");return await response.json() as WorkRecord}}
+export class PrototypeFallbackProvider implements DataProvider{private records=[...SAMPLE_RECORDS];async listWorkRecords(){return [...this.records]}async saveWorkRecord(record:WorkRecord){const index=this.records.findIndex((item)=>item.appId===record.appId);if(index>=0)this.records[index]=record;else this.records.unshift(record);return record}}
