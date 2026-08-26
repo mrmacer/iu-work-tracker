@@ -1,64 +1,61 @@
-# Data Model
+# IU Work Tracker Data Model — V1.1
 
 ## Relationship overview
 
 ```text
-Project 0..* <——> 0..* WorkRecord 0..* <——> 0..* Organization
+Project 0..* <——> 0..* WorkRecord 0..* <——> Organization
                               | 0..* <——> Contact
                               | 0..* <——> Category
-                              | 1 ——> 0..* Evidence
-                              | 1 ——> 0..* FollowUp
-                              └ 0..1 ——> OrbitClassification
-Configuration ——> derived quarter, reporting-day conversion, vocabulary
+                              └ 0..1 ——> ORBIT classification
+
+Reporting configuration ——> derived school year, quarter, and reporting days
+Provider metadata ——> storage identity, version, timestamps, and sync state
 ```
 
-## WorkRecord
+`WorkRecord` is the single business event. Today, History, Projects, organization/LEA context, and ORBIT projections all read that same record; the application does not create reporting copies.
 
-The canonical activity record.
+## Runtime WorkRecord
 
-| Group | Fields |
+| Concern | Runtime fields and rules |
 | --- | --- |
-| Identity | `appId` UUID, provider item ID, title, activity date, start/end timestamp, `durationMinutes`, status, created/modified timestamps, sync state, sample flag |
-| Description | activity type, short description, detailed notes, output, outcome, success/evidence summary, barrier, opportunity, next step |
-| Relationships | project IDs, organization IDs, contact IDs, category IDs; regional/all-district scope flag |
-| Reach | educator/leader, student/family, workforce/community, other participant counts; total derived where appropriate |
-| Follow-up | needed flag, due date, next-step summary; normalized FollowUp records may be added for multiple actions |
-| Reporting | optional OrbitClassification, precise STEM PoC minutes, TaC minutes, qualitative evidence references; school year and quarter derived from date |
+| Identity | `appId`, `title`, `activityDate`, explicit `activityType`, `status` |
+| Description | `description`, `detailedNotes`, `output`, `outcome`, `nextStep` |
+| Time | `durationMinutes` is the authoritative total activity duration and must be a positive whole number |
+| Engagement | `engagementScope`: `none`, `specific`, `regional`, or `allDistricts` |
+| Relationships | canonical `projectIds`, `organizationIds`, `contactIds`, and `categoryIds` arrays |
+| Reach | four non-negative whole-number counts |
+| General evidence | `evidenceSummary` and arbitrary stable `evidenceReferenceIds` |
+| Follow-up | `followUpNeeded` and optional `followUpDate` |
+| ORBIT | optional `orbit` object with `reportable`, one primary deliverable, supporting deliverables, PoC minutes, TaC minutes, and ORBIT evidence |
+| Evolution | `schemaVersion`, currently `2` |
+| Prototype marker | `isSample`; seeded scenarios remain clearly marked development data |
+| Persistence | nested `metadata` with provider ID, optimistic version, server timestamps, and sync state |
 
-Rules: title, activity date, duration, and activity type are the minimal quick-entry core. Counts are non-negative. End time may derive duration, but `durationMinutes` is authoritative. Multi-valued relationships use stable application IDs.
+Provider metadata is deliberately nested. SharePoint item IDs, ETags, D1 row IDs, and synchronization state do not become business classifications.
 
-## Project
+## Engagement scope
 
-`appId`, name, description, status, start/end dates, organization IDs, contact IDs, milestone summaries, created/modified timestamps. Time, activities, reach, outcomes, and evidence are calculated from related Work Records.
+- `none`: no district/LEA audience is implied. IU or partner organizations may still be related.
+- `specific`: at least one real organization of type `district` is required.
+- `regional`: regional audience; district IDs are not attached merely to express the scope.
+- `allDistricts`: all districts in the IU region; no fake or enumerated “all districts” organization is created.
 
-## Organization
+District IDs are rejected outside `specific`. Partner and IU organizations may coexist with any scope because they describe real relationships rather than LEA audience scope.
 
-`appId`, canonical name, organization type, subtype/LEA classification, PDE/NCES or other external ID, parent organization ID, active flag, region, created/modified timestamps. District names are selected from this entity rather than stored as uncontrolled record text.
+The V1 regional development sample previously used `org-regional`. Migration `drizzle/0001_free_corsair.sql` deterministically changes that exact stored relationship to `engagement_scope = 'regional'` and `organization_ids_json = '[]'`. The pseudo-organization is absent from reference data.
 
-## Contact
+## Reference and configuration entities
 
-`appId`, display name, title/role, organization ID, email, phone, tags, active flag, created/modified timestamps. V1 treats contacts as reusable references rather than a CRM.
+- `Project`: stable ID, name, description, status, and display color.
+- `Organization`: stable ID, canonical name, and real type (`district`, `partner`, or `iu`).
+- `Contact`: stable ID, display name, role, and optional organization relationship. V1.1 only supplies sample references; it is not a CRM.
+- `Category`: stable ID, name, and category group.
+- `Deliverable`: canonical ORBIT code and label.
+- `ReportingConfig`: minutes per day, July school-year boundary, and quarter month ranges.
+- `SystemSettings`: current controlled activity-type vocabulary.
 
-## Category
+All are requested by the frontend through `DataProvider` methods. The seed arrays live behind the provider and are not imported by screen components.
 
-`appId`, name, group, description, color token, sort order, active flag. Categories are configurable data, not conditionals embedded in the UI.
+## Validation and save ownership
 
-## Evidence
-
-`appId`, work record ID, evidence type, title, URL or future SharePoint drive/item reference, description, captured date, created/modified timestamps. V1 can capture links and notes; future storage can attach files without changing the Work Record.
-
-## FollowUp
-
-`appId`, work record ID, summary, due date, status, owner contact ID, completed date, reminder state, created/modified timestamps.
-
-## OrbitClassification
-
-`reportable`, primary deliverable, supporting deliverables, STEM PoC minutes, TaC minutes, qualitative evidence summary. Quarter and reporting days are derived rather than entered. The model permits one activity to support several deliverables while maintaining one official primary classification.
-
-## Configuration
-
-Named, versioned values for work categories, activity types, deliverables, school-year start, quarter boundaries, minutes per reporting day (default 420), reach labels, and capacity targets. Historical calculation settings should be versioned so rule changes do not rewrite source duration.
-
-## Provider boundary
-
-UI code consumes a `DataProvider` contract (`list`, `get`, `create`, `update`, configuration/entity lookup). V1 uses a prototype provider; a future `SharePointDataProvider` implements the same domain operations and maps storage IDs, field names, retries, and sync states internally.
+`lib/validation.ts` is shared by provider and API paths. It validates required strings, canonical IDs, arrays, reach, duration, engagement scope, schema version, and nested ORBIT invariants. A create receives server timestamps and version `1`. An update supplies `expectedVersion`; successful updates increment the version, preserve `createdAt`, and receive a server-owned `modifiedAt`.

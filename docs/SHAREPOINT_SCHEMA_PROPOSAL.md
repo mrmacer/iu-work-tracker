@@ -1,54 +1,38 @@
-# SharePoint Schema Proposal
+# SharePoint Schema Proposal — V1.1-Aligned
 
-No lists are created in V1. This proposal should be validated against the IU tenant, permissions, naming rules, retention policy, and expected reporting volume before provisioning.
+No SharePoint list, Microsoft Graph call, authentication flow, or synchronization process is implemented in V1.1. This proposal maps the runtime meaning that a future provider must preserve.
 
-## Recommended lists
+## IU_Work_Records
 
-### IU_Work_Records
+| Runtime concern | Proposed SharePoint storage |
+| --- | --- |
+| Stable identity | `AppId` unique indexed text |
+| Core activity | `Title`, `ActivityDate`, `ActivityType`, `DurationMinutes`, `Status`, descriptions, output/outcome/next step |
+| Engagement | `EngagementScope` choice: none/specific/regional/allDistricts |
+| Relationships | versioned JSON text arrays for `ProjectIds`, `OrganizationIds`, `ContactIds`, `CategoryIds` |
+| Reach | four number fields |
+| Evidence | `EvidenceSummary`, `EvidenceReferenceIdsJson`; references point to future stable evidence identities, not uploaded bytes in V1.1 |
+| Follow-up | `FollowUpNeeded`, `FollowUpDate` |
+| ORBIT | reportable yes/no, primary choice, supporting JSON, PoC minutes, TaC minutes, evidence summary |
+| Data evolution | `SchemaVersion` number |
+| Concurrency | SharePoint item ID and ETag map into nested provider metadata; ETag participates in expected-version updates |
+| Audit time | provider-created and modified timestamps map into nested metadata; the server/provider owns them |
 
-Core fields: Title (text), AppId (text, unique), ActivityDate (date/time), StartTime and EndTime (date/time, optional), DurationMinutes (number), Status (choice), ActivityTypeId (text), ShortDescription (multiline plain text), DetailedNotes (multiline plain text), Output, Outcome, SuccessEvidence, Barrier, Opportunity, NextStep (multiline plain text), FollowUpNeeded (yes/no), FollowUpDate (date), ProjectIds, OrganizationIds, ContactIds, CategoryIds (multiline text containing a versioned JSON array of stable AppIds), Reach counts (numbers), RegionalScope (choice), OrbitReportable (yes/no), OrbitPrimaryDeliverable (choice), OrbitSupportingDeliverables (multiline JSON), StemPocMinutes and TacMinutes (numbers), OrbitEvidenceSummary (multiline text), AppCreatedAt and AppModifiedAt (date/time), SchemaVersion (number), and SyncFingerprint (text).
+The proposed adapter must not store scope concepts such as “regional” as organization IDs. `OrganizationIds` always contains canonical real entities.
 
-Indexes: AppId unique; ActivityDate; Status; FollowUpDate; OrbitReportable plus ActivityDate if tenant list tooling supports the compound access pattern. Query by date ranges first and filter relationship ID arrays client-side for V1-scale volumes.
+## Reference lists
 
-### IU_Projects
+- `IU_Projects`: AppId, name/title, description, status, display metadata.
+- `IU_Organizations`: AppId, canonical name, type (`district`, `partner`, `iu`), external IDs and active state when later authorized.
+- `IU_Contacts`: AppId, display name, role, optional organization ID. V1.1 does not implement CRM behavior.
+- `IU_Work_Categories`: AppId, name, group, description/sort metadata.
+- `IU_ORBIT_Deliverables`: stable code and label, active/effective metadata if institutional policy requires it.
+- `IU_Settings`: versioned reporting configuration and controlled activity types.
 
-AppId (unique text), Title, Description, Status, StartDate, EndDate, OrganizationIds and ContactIds (versioned JSON), CreatedAt, ModifiedAt, Active. Index AppId, Status, and date fields.
+Use stable application IDs in multi-value JSON fields rather than display names or fragile multi-lookup columns. A future SharePoint provider resolves those IDs against canonical lists and returns the same domain types now consumed by the UI.
 
-### IU_Organizations
+## Provider contract implications
 
-AppId (unique text), Title/canonical name, OrganizationType, LeaType, ExternalId, ParentOrganizationAppId, Region, Active, CreatedAt, ModifiedAt. Index AppId, OrganizationType, Active, and ExternalId where populated.
+The future adapter implements work-record list/create/update and all reference/configuration getters. Create uses an application-generated AppId but provider-owned item ID, timestamps, and initial version. Update includes the expected ETag/version and returns a structured conflict instead of last-write-wins behavior. Validation remains below the UI and applies before persistence.
 
-### IU_Contacts
-
-AppId (unique text), Title/display name, Role, OrganizationAppId, Email, Phone, Tags (JSON), Active, CreatedAt, ModifiedAt. Index AppId, OrganizationAppId, Active.
-
-### IU_Work_Categories
-
-AppId (unique text), Title, Group, Description, ColorToken, SortOrder, Active. Index AppId, Group, Active.
-
-### IU_Evidence
-
-AppId (unique text), WorkRecordAppId, EvidenceType, Title, Url, DriveId, DriveItemId, Description, CapturedDate, CreatedAt, ModifiedAt. Store file bytes in a document library, not a list attachment. Index AppId, WorkRecordAppId, CapturedDate.
-
-### IU_Followups
-
-AppId (unique text), WorkRecordAppId, Summary, DueDate, Status, OwnerContactAppId, CompletedDate, ReminderState, CreatedAt, ModifiedAt. Index AppId, WorkRecordAppId, DueDate, Status.
-
-### IU_Settings
-
-Key (unique text), ValueJson (multiline plain text), Version (number), EffectiveFrom (date), EffectiveTo (date), Description. Stores quarter boundaries, minutes per reporting day, capacity targets, and controlled-vocabulary configuration.
-
-## Lookup strategy
-
-Use stable AppId text references for high-cardinality or multi-valued relationships. Avoid SharePoint multi-lookup columns for projects, organizations, contacts, categories, deliverables, and evidence because Graph expansion, list thresholds, batching, offline writes, and migration become unnecessarily fragile. The adapter resolves AppIds against cached canonical entities.
-
-A single-value SharePoint lookup may be reasonable later for a primary project or primary organization only if tenant testing proves a clear reporting benefit. Do not make correctness depend on display names.
-
-## ID and synchronization rules
-
-- Generate UUID AppIds before the network write; SharePoint item IDs remain provider metadata.
-- Enforce duplicate prevention through an indexed, unique AppId field and idempotent upsert behavior.
-- Store a schema version and a sync fingerprint/ETag. Use `If-Match` for safe updates.
-- Preserve unsaved payloads on failures and expose Saved, Saving, Offline, Sync pending, and Sync error states.
-- Discover and validate internal field names from list metadata; never infer them from display labels.
-- Batch relationship resolution and cache canonical entities to minimize Graph calls.
+Tenant permissions, retention, indexing thresholds, internal field names, and list provisioning remain intentionally unimplemented and must be validated before integration begins.

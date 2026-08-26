@@ -6,29 +6,10 @@ import {
   PrototypeFallbackProvider,
   type DataProvider,
 } from "../lib/data-provider";
-import {
-  CATEGORIES,
-  DELIVERABLES,
-  MINUTES_PER_REPORTING_DAY,
-  ORGANIZATIONS,
-  PROJECTS,
-  type WorkRecord,
-} from "../lib/models";
-import { SAMPLE_RECORDS } from "../lib/sample-data";
+import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
+import { deriveReportingDays } from "../lib/reporting";
 
 type View = "home" | "today" | "history" | "projects" | "orbit";
-const activityTypes = [
-  "District meeting",
-  "Professional learning",
-  "Classroom support",
-  "Project planning",
-  "Partner meeting",
-  "Student program",
-  "Internal planning",
-  "Resource development",
-  "Follow-up communication",
-  "Other",
-];
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
@@ -56,18 +37,19 @@ const entityName = (items: { appId: string; name: string }[], id: string) =>
   items.find((item) => item.appId === id)?.name ?? "Unassigned";
 
 function emptyRecord(): WorkRecord {
-  const now = new Date().toISOString();
   return {
     appId: crypto.randomUUID(),
     title: "",
     activityDate: todayIso(),
-    activityType: "District meeting",
+    activityType: "",
     description: "",
     detailedNotes: "",
     durationMinutes: 60,
     status: "complete",
+    engagementScope: "none",
     projectIds: [],
     organizationIds: [],
+    contactIds: [],
     categoryIds: [],
     reach: {
       educatorsLeaders: 0,
@@ -75,6 +57,8 @@ function emptyRecord(): WorkRecord {
       workforceCommunity: 0,
       other: 0,
     },
+    evidenceSummary: "",
+    evidenceReferenceIds: [],
     output: "",
     outcome: "",
     nextStep: "",
@@ -88,16 +72,16 @@ function emptyRecord(): WorkRecord {
       tacMinutes: 0,
       evidence: "",
     },
+    schemaVersion: WORK_RECORD_SCHEMA_VERSION,
+    metadata: { version: 0, createdAt: "", modifiedAt: "", syncState: "saved" },
     isSample: false,
-    createdAt: now,
-    modifiedAt: now,
-    syncState: "saved",
   };
 }
 
-export default function IUWorkTracker() {
+export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataProvider } = {}) {
   const [view, setView] = useState<View>("home");
-  const [records, setRecords] = useState<WorkRecord[]>(SAMPLE_RECORDS);
+  const [records, setRecords] = useState<WorkRecord[]>([]);
+  const [references, setReferences] = useState<ReferenceData | null>(null);
   const [loading, setLoading] = useState(true);
   const [storageMode, setStorageMode] = useState<"connected" | "fallback">(
     "connected",
@@ -108,25 +92,37 @@ export default function IUWorkTracker() {
   const [saveError, setSaveError] = useState("");
   const [saving, setSaving] = useState(false);
   const [search, setSearch] = useState("");
-  const provider = useRef<DataProvider>(new ApiDataProvider());
+  const [draftBaseline, setDraftBaseline] = useState("");
+  const opener = useRef<HTMLElement | null>(null);
+  const provider = useRef<DataProvider>(dataProvider ?? new ApiDataProvider());
   useEffect(() => {
     let live = true;
-    provider.current
-      .listWorkRecords()
-      .then((data) => {
-        if (live) setRecords(data);
-      })
-      .catch(async () => {
+    const load = async () => {
+      const loadFrom = async (source: DataProvider) => {
+        const [result, projects, organizations, contacts, categories, deliverables, reportingConfig, settings] = await Promise.all([
+          source.getWorkRecords(), source.getProjects(), source.getOrganizations(), source.getContacts(), source.getCategories(),
+          source.getDeliverables(), source.getReportingConfig(), source.getSystemSettings(),
+        ]);
+        if (result.status !== "success") throw new Error(result.status);
+        if (live) {
+          setRecords(result.value);
+          setReferences({ projects, organizations, contacts, categories, deliverables, reportingConfig, settings });
+        }
+      };
+      try {
+        await loadFrom(provider.current);
+      } catch {
         const fallback = new PrototypeFallbackProvider();
         provider.current = fallback;
         if (live) {
-          setRecords(await fallback.listWorkRecords());
           setStorageMode("fallback");
         }
-      })
-      .finally(() => {
+        await loadFrom(fallback);
+      } finally {
         if (live) setLoading(false);
-      });
+      }
+    };
+    void load();
     return () => {
       live = false;
     };
@@ -145,7 +141,10 @@ export default function IUWorkTracker() {
       String(a.followUpDate).localeCompare(String(b.followUpDate)),
     );
   const openLog = (record?: WorkRecord) => {
-    setDraft(record ? structuredClone(record) : emptyRecord());
+    const next = record ? structuredClone(record) : emptyRecord();
+    opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    setDraft(next);
+    setDraftBaseline(JSON.stringify(next));
     setStep(1);
     setSaveError("");
     setLogging(true);
@@ -153,7 +152,7 @@ export default function IUWorkTracker() {
   const patchDraft = (patch: Partial<WorkRecord>) =>
     setDraft((current) => ({ ...current, ...patch }));
   const toggle = (
-    key: "projectIds" | "organizationIds" | "categoryIds",
+    key: "projectIds" | "organizationIds" | "contactIds" | "categoryIds",
     id: string,
   ) =>
     setDraft((current) => ({
@@ -173,21 +172,25 @@ export default function IUWorkTracker() {
     }
     setSaving(true);
     setSaveError("");
-    const pending = {
-      ...draft,
-      title: draft.title.trim(),
-      modifiedAt: new Date().toISOString(),
-      syncState: "saving" as const,
-    };
+    const pending: WorkRecord = { ...draft, title: draft.title.trim(), metadata: { ...draft.metadata, syncState: "saving" } };
+    const result = draft.metadata.version > 0
+      ? await provider.current.updateWorkRecord(pending, draft.metadata.version)
+      : await provider.current.createWorkRecord(pending);
     try {
-      const saved = await provider.current.saveWorkRecord(pending);
+      if (result.status !== "success") {
+        setSaveError(result.status === "validation_error" ? result.errors[0]?.message ?? "Check the record and try again." : result.message);
+        return;
+      }
+      const saved = result.value;
       setRecords((current) =>
         [saved, ...current.filter((item) => item.appId !== saved.appId)].sort(
           (a, b) => b.activityDate.localeCompare(a.activityDate),
         ),
       );
       if (another) {
-        setDraft(emptyRecord());
+        const next = emptyRecord();
+        setDraft(next);
+        setDraftBaseline(JSON.stringify(next));
         setStep(1);
       } else {
         setLogging(false);
@@ -201,8 +204,14 @@ export default function IUWorkTracker() {
       setSaving(false);
     }
   };
+  const requestClose = () => {
+    const dirty = JSON.stringify(draft) !== draftBaseline;
+    if (dirty && !window.confirm("Discard the changes in this work entry?")) return;
+    setLogging(false);
+  };
   return (
-    <main className="os-shell">
+    <>
+    <main className="os-shell" inert={logging ? true : undefined} aria-hidden={logging || undefined}>
       <Header view={view} setView={setView} onLog={() => openLog()} />
       <div className="os-body">
         <SideNav view={view} setView={setView} onLog={() => openLog()} />
@@ -213,7 +222,7 @@ export default function IUWorkTracker() {
               the connected data store will be used when available.
             </div>
           )}
-          {loading ? (
+          {loading || !references ? (
             <div className="loading-card">Preparing your workspace…</div>
           ) : view === "home" ? (
             <Home
@@ -223,6 +232,7 @@ export default function IUWorkTracker() {
               followups={followups}
               openLog={openLog}
               setView={setView}
+              references={references}
             />
           ) : view === "today" ? (
             <Today
@@ -230,6 +240,7 @@ export default function IUWorkTracker() {
               total={totalToday}
               followups={followups}
               openLog={openLog}
+              references={references}
             />
           ) : view === "history" ? (
             <History
@@ -237,11 +248,12 @@ export default function IUWorkTracker() {
               search={search}
               setSearch={setSearch}
               openLog={openLog}
+              references={references}
             />
           ) : view === "projects" ? (
-            <Projects records={records} setView={setView} />
+            <Projects records={records} setView={setView} projects={references.projects} />
           ) : (
-            <Orbit records={records} />
+            <Orbit records={records} references={references} />
           )}
         </section>
       </div>
@@ -254,20 +266,23 @@ export default function IUWorkTracker() {
         </span>
         <span>Log it once. Use it everywhere.</span>
       </footer>
-      {logging && (
+    </main>
+      {logging && references && (
         <LogWizard
           record={draft}
           step={step}
           setStep={setStep}
           patch={patchDraft}
           toggle={toggle}
-          close={() => setLogging(false)}
+          close={requestClose}
           save={save}
           saving={saving}
           error={saveError}
+          references={references}
+          returnFocusRef={opener}
         />
       )}
-    </main>
+    </>
   );
 }
 
@@ -350,6 +365,7 @@ function Home({
   followups,
   openLog,
   setView,
+  references,
 }: {
   records: WorkRecord[];
   todayRecords: WorkRecord[];
@@ -357,6 +373,7 @@ function Home({
   followups: WorkRecord[];
   openLog: (r?: WorkRecord) => void;
   setView: (v: View) => void;
+  references: ReferenceData;
 }) {
   const latest = todayRecords.slice(0, 3);
   return (
@@ -402,6 +419,7 @@ function Home({
                   key={record.appId}
                   record={record}
                   onClick={() => openLog(record)}
+                  organizations={references.organizations}
                 />
               ))
             ) : (
@@ -483,11 +501,13 @@ function Today({
   total,
   followups,
   openLog,
+  references,
 }: {
   records: WorkRecord[];
   total: number;
   followups: WorkRecord[];
   openLog: (r?: WorkRecord) => void;
+  references: ReferenceData;
 }) {
   return (
     <div className="screen-inner">
@@ -525,6 +545,7 @@ function Today({
                 key={record.appId}
                 record={record}
                 onClick={() => openLog(record)}
+                organizations={references.organizations}
               />
             ))
           ) : (
@@ -557,11 +578,13 @@ function History({
   search,
   setSearch,
   openLog,
+  references,
 }: {
   records: WorkRecord[];
   search: string;
   setSearch: (v: string) => void;
   openLog: (r: WorkRecord) => void;
+  references: ReferenceData;
 }) {
   const filtered = records.filter((record) =>
     `${record.title} ${record.description} ${record.activityType}`
@@ -608,13 +631,17 @@ function History({
             <span>
               <strong>
                 {record.projectIds[0]
-                  ? entityName(PROJECTS, record.projectIds[0])
+                  ? entityName(references.projects, record.projectIds[0])
                   : "No project"}
               </strong>
               <small>
                 {record.organizationIds[0]
-                  ? entityName(ORGANIZATIONS, record.organizationIds[0])
-                  : "No organization"}
+                  ? entityName(references.organizations, record.organizationIds[0])
+                  : record.engagementScope === "regional"
+                    ? "Regional scope"
+                    : record.engagementScope === "allDistricts"
+                      ? "All districts"
+                      : "No organization"}
               </small>
             </span>
             <span>
@@ -645,9 +672,11 @@ function History({
 function Projects({
   records,
   setView,
+  projects,
 }: {
   records: WorkRecord[];
   setView: (v: View) => void;
+  projects: ReferenceData["projects"];
 }) {
   return (
     <div className="screen-inner">
@@ -657,7 +686,7 @@ function Projects({
         copy="See the activity, time, and outcomes accumulating around each initiative."
       />
       <div className="project-grid">
-        {PROJECTS.map((project) => {
+        {projects.map((project) => {
           const related = records.filter((record) =>
             record.projectIds.includes(project.appId),
           );
@@ -703,7 +732,7 @@ function Projects({
     </div>
   );
 }
-function Orbit({ records }: { records: WorkRecord[] }) {
+function Orbit({ records, references }: { records: WorkRecord[]; references: ReferenceData }) {
   const reportable = records.filter((record) => record.orbit.reportable);
   const poc = reportable.reduce(
     (sum, record) => sum + record.orbit.stemPocMinutes,
@@ -741,7 +770,7 @@ function Orbit({ records }: { records: WorkRecord[] }) {
       </div>
       <div className="orbit-stats">
         <MetricCard
-          value={(poc / MINUTES_PER_REPORTING_DAY).toFixed(2)}
+          value={deriveReportingDays(poc, references.reportingConfig).toFixed(2)}
           label="STEM PoC days used"
           detail={`${hours(poc)} ÷ 7-hour day`}
           tone="teal"
@@ -774,7 +803,7 @@ function Orbit({ records }: { records: WorkRecord[] }) {
             </div>
             <span>{reportable.length} records</span>
           </div>
-          {DELIVERABLES.map(([code, label]) => {
+          {references.deliverables.map(({ code, label }) => {
             const related = reportable.filter(
               (record) => record.orbit.primaryDeliverable === code,
             );
@@ -784,7 +813,7 @@ function Orbit({ records }: { records: WorkRecord[] }) {
             );
             const max = Math.max(
               1,
-              ...DELIVERABLES.map(([c]) =>
+              ...references.deliverables.map(({ code: c }) =>
                 reportable
                   .filter((r) => r.orbit.primaryDeliverable === c)
                   .reduce((s, r) => s + r.orbit.stemPocMinutes, 0),
@@ -813,10 +842,10 @@ function Orbit({ records }: { records: WorkRecord[] }) {
             <b>{poc}</b>
             <span>minutes</span>
             <i>÷</i>
-            <b>{MINUTES_PER_REPORTING_DAY}</b>
+            <b>{references.reportingConfig.minutesPerReportingDay}</b>
             <span>minutes/day</span>
             <i>=</i>
-            <b>{(poc / MINUTES_PER_REPORTING_DAY).toFixed(2)}</b>
+            <b>{deriveReportingDays(poc, references.reportingConfig).toFixed(2)}</b>
             <span>days</span>
           </div>
           <p>
@@ -843,19 +872,23 @@ function LogWizard({
   save,
   saving,
   error,
+  references,
+  returnFocusRef,
 }: {
   record: WorkRecord;
   step: number;
   setStep: (s: number) => void;
   patch: (p: Partial<WorkRecord>) => void;
   toggle: (
-    k: "projectIds" | "organizationIds" | "categoryIds",
+    k: "projectIds" | "organizationIds" | "contactIds" | "categoryIds",
     id: string,
   ) => void;
   close: () => void;
   save: (another?: boolean) => void;
   saving: boolean;
   error: string;
+  references: ReferenceData;
+  returnFocusRef: React.RefObject<HTMLElement | null>;
 }) {
   const titles = [
     "What did you do?",
@@ -864,14 +897,45 @@ function LogWizard({
     "What resulted?",
     "Does it connect to STEM / ORBIT?",
   ];
-  const canNext = step !== 1 || Boolean(record.title.trim());
+  const dialogRef = useRef<HTMLElement>(null);
+  const firstFieldRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    const returnFocus = returnFocusRef.current;
+    firstFieldRef.current?.focus();
+    return () => returnFocus?.focus();
+  }, [returnFocusRef]);
+  useEffect(() => {
+    const handleDialogKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        close();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = [...dialogRef.current.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), summary, [tabindex]:not([tabindex="-1"])')].filter((element) => {
+        const details = element.closest("details");
+        return !element.hidden && (!details || details.open || element.tagName === "SUMMARY");
+      });
+      if (!focusable.length) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    document.addEventListener("keydown", handleDialogKeyDown);
+    return () => document.removeEventListener("keydown", handleDialogKeyDown);
+  }, [close]);
+  const canNext = step !== 1 || Boolean(record.title.trim() && record.activityType);
   return (
     <div className="modal-backdrop" role="presentation">
       <section
+        ref={dialogRef}
         className="log-modal"
         role="dialog"
         aria-modal="true"
         aria-labelledby="log-title"
+        aria-describedby="log-step-status"
+        tabIndex={-1}
       >
         <header className="log-header">
           <div>
@@ -886,14 +950,17 @@ function LogWizard({
             ×
           </button>
         </header>
-        <div className="stepper" aria-label={`Step ${step} of 5`}>
-          {titles.map((_, index) => (
+        <p className="sr-only" id="log-step-status">Step {step} of 5: {titles[step - 1]}. Current step.</p>
+        <div className="stepper" aria-label="Work entry steps">
+          {titles.map((title, index) => (
             <button
               key={index}
               onClick={() => setStep(index + 1)}
               className={
                 step === index + 1 ? "active" : step > index + 1 ? "done" : ""
               }
+              aria-current={step === index + 1 ? "step" : undefined}
+              aria-label={`Step ${index + 1} of 5: ${title}${step === index + 1 ? ", current step" : step > index + 1 ? ", completed" : ""}`}
             >
               <span>{step > index + 1 ? "✓" : index + 1}</span>
               <i />
@@ -908,6 +975,7 @@ function LogWizard({
                   Activity title <b>*</b>
                 </span>
                 <input
+                  ref={firstFieldRef}
                   value={record.title}
                   onChange={(e) => patch({ title: e.target.value })}
                   placeholder="e.g. District STEELS planning meeting"
@@ -921,7 +989,8 @@ function LogWizard({
                   value={record.activityType}
                   onChange={(e) => patch({ activityType: e.target.value })}
                 >
-                  {activityTypes.map((type) => (
+                  <option value="">Choose an activity type…</option>
+                  {references.settings.activityTypes.map((type) => (
                     <option key={type}>{type}</option>
                   ))}
                 </select>
@@ -940,30 +1009,50 @@ function LogWizard({
           {step === 2 && (
             <div className="form-stack">
               <fieldset>
-                <legend>Organization or district</legend>
-                <div className="choice-grid">
-                  {ORGANIZATIONS.map((item) => (
+                <legend>District / LEA scope</legend>
+                <div className="scope-grid">
+                  {[
+                    ["none", "No district"],
+                    ["specific", "Specific district(s)"],
+                    ["regional", "Regional work"],
+                    ["allDistricts", "All districts"],
+                  ].map(([value, label]) => (
                     <button
                       type="button"
-                      key={item.appId}
-                      className={
-                        record.organizationIds.includes(item.appId)
-                          ? "selected"
-                          : ""
-                      }
-                      onClick={() => toggle("organizationIds", item.appId)}
+                      key={value}
+                      className={record.engagementScope === value ? "selected" : ""}
+                      aria-pressed={record.engagementScope === value}
+                      onClick={() => {
+                        const districtIds = new Set(references.organizations.filter((item) => item.type === "district").map((item) => item.appId));
+                        patch({
+                          engagementScope: value as WorkRecord["engagementScope"],
+                          organizationIds: value === "specific" ? record.organizationIds : record.organizationIds.filter((id) => !districtIds.has(id)),
+                        });
+                      }}
                     >
-                      <span>
-                        {item.type === "district"
-                          ? "▦"
-                          : item.type === "partner"
-                            ? "◇"
-                            : "○"}
-                      </span>
-                      {item.name}
-                      <i>
-                        {record.organizationIds.includes(item.appId) ? "✓" : ""}
-                      </i>
+                      {label}
+                    </button>
+                  ))}
+                </div>
+              </fieldset>
+              {record.engagementScope === "specific" && (
+                <fieldset>
+                  <legend>District(s) <small>select one or more</small></legend>
+                  <div className="choice-grid">
+                    {references.organizations.filter((item) => item.type === "district").map((item) => (
+                      <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
+                        <span>▦</span>{item.name}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
+                      </button>
+                    ))}
+                  </div>
+                </fieldset>
+              )}
+              <fieldset>
+                <legend>Organization / partner <small>optional</small></legend>
+                <div className="choice-grid">
+                  {references.organizations.filter((item) => item.type !== "district").map((item) => (
+                    <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
+                      <span>{item.type === "partner" ? "◇" : "○"}</span>{item.name}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
                     </button>
                   ))}
                 </div>
@@ -973,7 +1062,7 @@ function LogWizard({
                   Project <small>optional</small>
                 </legend>
                 <div className="chip-grid">
-                  {PROJECTS.map((item) => (
+                  {references.projects.map((item) => (
                     <button
                       type="button"
                       key={item.appId}
@@ -987,57 +1076,35 @@ function LogWizard({
                   ))}
                 </div>
               </fieldset>
-              <fieldset>
-                <legend>
-                  Work areas <small>select all that apply</small>
-                </legend>
-                <div className="chip-grid">
-                  {CATEGORIES.map((item) => (
-                    <button
-                      type="button"
-                      key={item.appId}
-                      className={
-                        record.categoryIds.includes(item.appId)
-                          ? "selected"
-                          : ""
-                      }
-                      onClick={() => toggle("categoryIds", item.appId)}
-                    >
-                      {item.name}
-                    </button>
-                  ))}
+              <details className="advanced-details">
+                <summary>Add classification / reach</summary>
+                <div className="advanced-content">
+                  <fieldset>
+                    <legend>Work areas <small>select all that apply</small></legend>
+                    <div className="chip-grid">
+                      {references.categories.map((item) => (
+                        <button type="button" key={item.appId} className={record.categoryIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("categoryIds", item.appId)}>{item.name}</button>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Audience reach <small>optional</small></legend>
+                    <div className="reach-grid">
+                      {[["Educators / leaders", "educatorsLeaders"], ["Students / families", "studentsFamilies"], ["Workforce / community", "workforceCommunity"], ["Other", "other"]].map(([label, key]) => (
+                        <label key={key}><span>{label}</span><input type="number" min="0" value={record.reach[key as keyof typeof record.reach]} onChange={(e) => patch({ reach: { ...record.reach, [key]: Number(e.target.value) } })} /></label>
+                      ))}
+                    </div>
+                  </fieldset>
+                  <fieldset>
+                    <legend>Contacts <small>optional sample references</small></legend>
+                    <div className="chip-grid">
+                      {references.contacts.map((item) => <button type="button" key={item.appId} className={record.contactIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("contactIds", item.appId)}>{item.displayName}</button>)}
+                    </div>
+                  </fieldset>
+                  <label><span>Evidence summary</span><textarea rows={2} value={record.evidenceSummary} onChange={(e) => patch({ evidenceSummary: e.target.value })} placeholder="Optional note about supporting evidence" /></label>
+                  <label><span>Stable evidence reference IDs <small>comma-separated</small></span><input value={record.evidenceReferenceIds.join(", ")} onChange={(e) => patch({ evidenceReferenceIds: e.target.value.split(",").map((value) => value.trim()).filter(Boolean) })} placeholder="e.g. dev-evidence-roadmap" /></label>
                 </div>
-              </fieldset>
-              <fieldset>
-                <legend>
-                  Audience reach <small>optional</small>
-                </legend>
-                <div className="reach-grid">
-                  {[
-                    ["Educators / leaders", "educatorsLeaders"],
-                    ["Students / families", "studentsFamilies"],
-                    ["Workforce / community", "workforceCommunity"],
-                    ["Other", "other"],
-                  ].map(([label, key]) => (
-                    <label key={key}>
-                      <span>{label}</span>
-                      <input
-                        type="number"
-                        min="0"
-                        value={record.reach[key as keyof typeof record.reach]}
-                        onChange={(e) =>
-                          patch({
-                            reach: {
-                              ...record.reach,
-                              [key]: Math.max(0, Number(e.target.value)),
-                            },
-                          })
-                        }
-                      />
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
+              </details>
             </div>
           )}
           {step === 3 && (
@@ -1173,7 +1240,7 @@ function LogWizard({
                     <small>Optional. Non-STEM work belongs here too.</small>
                   </span>
                 </div>
-                <div className="switch">
+                <label className="switch">
                   <input
                     aria-label="ORBIT reportable"
                     type="checkbox"
@@ -1183,27 +1250,31 @@ function LogWizard({
                         orbit: {
                           ...record.orbit,
                           reportable: e.target.checked,
+                          primaryDeliverable: e.target.checked ? record.orbit.primaryDeliverable : null,
+                          supportingDeliverables: e.target.checked ? record.orbit.supportingDeliverables : [],
                           stemPocMinutes:
                             e.target.checked &&
                             record.orbit.stemPocMinutes === 0
                               ? record.durationMinutes
-                              : record.orbit.stemPocMinutes,
+                              : e.target.checked ? record.orbit.stemPocMinutes : 0,
+                          tacMinutes: e.target.checked ? record.orbit.tacMinutes : 0,
                         },
                       })
                     }
                   />
-                  <span />
-                </div>
+                  <span aria-hidden="true" />
+                </label>
               </div>
               {record.orbit.reportable ? (
                 <>
                   <fieldset>
                     <legend>Primary deliverable</legend>
                     <div className="deliverable-choices">
-                      {DELIVERABLES.map(([code, label]) => (
+                      {references.deliverables.map(({ code, label }) => (
                         <button
                           type="button"
                           key={code}
+                          aria-label={`Primary deliverable ${code}: ${label}`}
                           className={
                             record.orbit.primaryDeliverable === code
                               ? "selected"
@@ -1214,6 +1285,7 @@ function LogWizard({
                               orbit: {
                                 ...record.orbit,
                                 primaryDeliverable: code,
+                                supportingDeliverables: record.orbit.supportingDeliverables.filter((value) => value !== code),
                               },
                             })
                           }
@@ -1224,6 +1296,24 @@ function LogWizard({
                       ))}
                     </div>
                   </fieldset>
+                  <details className="advanced-details">
+                    <summary>Add supporting deliverables</summary>
+                    <div className="advanced-content">
+                      <div className="chip-grid">
+                        {references.deliverables.filter(({ code }) => code !== record.orbit.primaryDeliverable).map(({ code, label }) => (
+                          <button
+                            type="button"
+                            key={code}
+                            aria-label={`Supporting deliverable ${code}: ${label}`}
+                            className={record.orbit.supportingDeliverables.includes(code) ? "selected" : ""}
+                            onClick={() => patch({ orbit: { ...record.orbit, supportingDeliverables: record.orbit.supportingDeliverables.includes(code) ? record.orbit.supportingDeliverables.filter((value) => value !== code) : [...record.orbit.supportingDeliverables, code] } })}
+                          >
+                            {code} · {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </details>
                   <div className="form-two">
                     <label>
                       <span>STEM PoC minutes</span>
@@ -1364,9 +1454,11 @@ function MetricCard({
 function RecordRow({
   record,
   onClick,
+  organizations,
 }: {
   record: WorkRecord;
   onClick: () => void;
+  organizations: ReferenceData["organizations"];
 }) {
   return (
     <button className="record-row" onClick={onClick}>
@@ -1378,8 +1470,12 @@ function RecordRow({
         <small>
           {record.isSample && <em>Sample</em>}
           {record.organizationIds[0]
-            ? entityName(ORGANIZATIONS, record.organizationIds[0])
-            : record.activityType}
+            ? entityName(organizations, record.organizationIds[0])
+            : record.engagementScope === "regional"
+              ? "Regional scope"
+              : record.engagementScope === "allDistricts"
+                ? "All districts"
+                : record.activityType}
         </small>
       </span>
       <b>{hours(record.durationMinutes)}</b>

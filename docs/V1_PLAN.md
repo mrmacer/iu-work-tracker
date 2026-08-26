@@ -1,39 +1,38 @@
-# V1 Plan
+# V1.1 Plan and Implemented Scope
 
 ## Goal
 
-Prove that one universal Work Record can make daily documentation fast while also supporting projects, districts, and optional ORBIT reporting.
+Make the universal Work Record trustworthy enough to enter, classify, persist, update, project, and later map to SharePoint without changing its meaning.
 
-## Included
+## Implemented in V1.1 (R1–R9)
 
-- Finite kiosk-style shell and command center.
-- Five-step Quick Log with progressive disclosure, Save & Done, and Save & Log Another.
-- Today view with time, records, follow-ups, and quick add.
-- Work History with search/filter and basic edit flow.
-- Projects workspace backed by canonical project entities and calculated record totals.
-- STEM/ORBIT workspace with reportable time, configurable seven-hour day conversion, deliverable distribution, reach, and explicit development-data labeling.
-- Canonical Work Record TypeScript model plus projects, organizations, contacts, categories, evidence, follow-up, and configuration types.
-- DataProvider boundary with a prototype provider; future SharePoint adapter contract documented.
-- Small, clearly labeled development sample set spanning STEM and non-STEM work, districts, partners, students, and projects.
-- Responsive and accessible keyboard/touch interaction.
+- Semantic ORBIT checkbox/label control with mouse, touch-compatible pointer semantics, keyboard control, and accessible state.
+- Provider-loaded Work Records, projects, organizations, contacts, categories, deliverables, reporting configuration, and system settings.
+- Explicit engagement scope separated from real canonical organizations.
+- General evidence references, contacts, schema version, and nested provider metadata.
+- Optional ORBIT classification with primary/supporting deliverables, pure calculations, and conservative PoC/TaC allocation.
+- Explicit activity type plus progressive classification/reach/evidence/contact controls.
+- Shared runtime validation, structured results, server timestamps, immutable creation time, and optimistic version conflicts.
+- Drizzle schema plus generated migrations as the only D1 schema authority; sample seeding remains separate.
+- Modal focus entry, focus trap, Escape protection, focus restoration, and accessible step names/state.
 
-## Deferred
+## Migration workflow
 
-Microsoft Entra sign-in, Graph synchronization, SharePoint list creation, file upload, Power Automate, reminders, contacts CRM, official ORBIT export, advanced dashboards, multi-user roles, and production performance claims.
+`db/schema.ts` is authoritative. Run `npm run db:generate` after an approved schema change and inspect the generated SQL in `drizzle/`. Deployment applies those ordered migrations through the Sites workflow. The API assumes migration is complete and never creates or alters tables during a request.
 
-## Implementation slices
+For an existing local V1 database, apply `drizzle/0001_free_corsair.sql` through the local D1 migration runner before starting V1.1. A fresh database applies `0000` then `0001`. Migration `0001` preserves development data, adds V1.1 columns/default versions, converts the exact old regional sample relationship, carries ORBIT evidence into general evidence summary, and corrects the one legacy sample allocation that exceeded duration.
 
-1. Domain schema, configuration, provider contract, and labeled sample seed.
-2. Recognizable command-center shell and navigation.
-3. Quick Log workflow and persistence.
-4. Today, History/editing, Projects, and ORBIT summaries.
-5. Responsive/accessibility refinement, validation, and deployment.
+Sample seeding uses `INSERT OR IGNORE` after the schema is ready. It does not perform schema migration and does not overwrite user records.
 
 ## Acceptance checks
 
-- A first-time user can find Log Work in under five seconds.
-- A routine record requires only activity, audience/context, time, result, and optional ORBIT steps.
-- Non-STEM records never require ORBIT fields.
-- A saved or edited record appears consistently in Today, History, Projects, and summary calculations.
-- Provider-specific calls do not appear in screen components.
-- Sample metrics are always labeled development data.
+- Routine non-ORBIT entry keeps optional classifications behind disclosure.
+- The ORBIT pointer and keyboard paths persist `reportable: true` with a valid primary deliverable.
+- Invalid scope, arrays, counts, time, and nested ORBIT shapes return structured validation errors.
+- Create and update result types are explicit; failed saves keep the open draft.
+- Stale updates return a conflict with the current version.
+- Ten clearly marked development scenarios exercise Today, History, Project, organization/LEA, scope, and ORBIT projections from the same records.
+
+## Explicitly deferred
+
+R10 Today enhancements, R11 project-specific history, R12 expanded History search, R13 production fallback redesign, R14 Home cleanup, and R15 sample reset/hide controls remain deferred. Microsoft authentication, Graph, SharePoint lists, Power Automate, Outlook/Teams integration, uploads, CRM, AI summaries, and advanced dashboards are also deferred.

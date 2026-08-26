@@ -1,42 +1,54 @@
-# ORBIT Reporting Mapping
+# ORBIT Reporting Mapping — V1.1
 
-ORBIT is an optional classification and reporting projection over canonical Work Records. Non-ORBIT work follows the same daily workflow and remains fully valid.
+ORBIT is an optional projection over a canonical Work Record. A non-reportable record is valid without ORBIT classification or reporting time. A reportable record requires exactly one valid primary deliverable and may include distinct supporting deliverables behind progressive disclosure.
 
 ## Deliverables
 
-| Code | 2026–2027 deliverable | Work Record mapping |
-| --- | --- | --- |
-| A | Strengthening Statewide STEM & CS Systems | primary or supporting deliverable code `A` |
-| B | Supporting Implementation of PA STEELS | code `B` |
-| C | Strengthening CS, AI, and Computational Thinking | code `C` |
-| D | Equipping Educational Leaders for Student-Centered STEM/CS | code `D` |
-| E | Workforce Collaboration and Ecosystem Development | code `E` |
-| F | Student Competitions and Experiences | code `F` |
-| G | Math Instruction and Data Literacy through Transdisciplinary STEM | code `G` |
-
-A reportable record has one primary deliverable for official grouping and zero or more supporting deliverables for honest cross-cutting analysis.
-
-## Metric mapping
-
-| ORBIT need | Source/derivation |
+| Code | Runtime label |
 | --- | --- |
-| STEM PoC time | `orbit.stemPocMinutes`; sum and divide by configured minutes per day |
-| TaC time | `orbit.tacMinutes`; sum and divide by the same or role-specific configured rule |
-| Educators/leaders | `reach.educatorsLeaders` |
-| Students/families | `reach.studentsFamilies` |
-| Workforce/community | `reach.workforceCommunity` |
-| LEAs served | distinct linked Organization AppIds with an LEA type |
-| Reporting quarter | derived from activity date and versioned school-year quarter settings |
-| Qualitative evidence | output, outcome, success/evidence summary, notes, linked Evidence records |
+| A | Statewide STEM & CS systems |
+| B | PA STEELS implementation |
+| C | CS, AI & computational thinking |
+| D | Educational leadership |
+| E | Workforce & ecosystem development |
+| F | Student competitions & experiences |
+| G | Math instruction & data literacy |
 
-Source duration remains in minutes. Reporting days are always calculated (`minutes / configuredMinutesPerDay`, initially 420) so a future policy change does not corrupt activity history.
+The primary code drives official grouping. Supporting codes preserve cross-cutting context but do not add another copy of the record or its time.
 
-## Reporting projection
+## Time rules
 
-1. Select reportable Work Records in the requested date range.
-2. Derive the applicable school year and quarter from each activity date.
-3. Group official totals by primary deliverable; keep supporting-deliverable attribution available as a separate analytical view to prevent double-counting.
-4. Sum role minutes and reach; count distinct LEAs.
-5. include linked qualitative evidence and human-review flags.
+The model distinguishes:
 
-V1 summaries are indicative planning views, not an official ORBIT export. A later export must document aggregation, double-counting, and evidence-selection rules and should provide a review queue before submission.
+- `durationMinutes`: total elapsed/work duration for the Work Record.
+- `orbit.stemPocMinutes`: the portion allocated to STEM Point-of-Contact reporting.
+- `orbit.tacMinutes`: the portion allocated to TaC reporting.
+
+V1.1 uses the conservative allocation rule:
+
+```text
+stemPocMinutes >= 0
+tacMinutes >= 0
+stemPocMinutes + tacMinutes <= durationMinutes
+```
+
+PoC and TaC may coexist only as non-overlapping allocations. The same minute cannot be counted in both. This rule was chosen because the existing V1 material did not authorize overlapping role time; conservative allocation avoids silently inflating institutional totals.
+
+Non-reportable records store no ORBIT deliverables or reporting minutes. Turning ORBIT off in Quick Log clears those fields.
+
+## Pure derivations
+
+`lib/reporting.ts` supplies tested, side-effect-free calculations:
+
+- School year: July 1 starts the next labeled school year. `2026-07-01` is `2026-2027`; `2026-06-30` is `2025-2026`.
+- Quarter: Q1 July–September, Q2 October–December, Q3 January–March, Q4 April–June.
+- Reporting days: `stemPocMinutes / minutesPerReportingDay`.
+- PoC/TaC projection: returns stored allocation only when `reportable` is true.
+
+`minutesPerReportingDay` is supplied by `ReportingConfig` and is currently `420`; it is not scattered through UI code. School year and quarter are derived rather than stored.
+
+## Validation
+
+Shared validation rejects missing or invalid primary deliverables, duplicate supporting codes, the primary code repeated as supporting, invalid codes, malformed arrays/ORBIT objects, negative reach/time, reporting allocation above duration, and hidden ORBIT data on a non-reportable record.
+
+The ORBIT screen reuses the Work Record’s reach and reporting allocations. It never creates a reporting-only business record.
