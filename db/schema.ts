@@ -1,4 +1,4 @@
-import { integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
 
 export const workRecords = sqliteTable("work_records", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -12,4 +12,8 @@ export const workRecords = sqliteTable("work_records", {
   orbitReportable: integer("orbit_reportable", { mode: "boolean" }).notNull().default(false), orbitPrimaryDeliverable: text("orbit_primary_deliverable"),
   orbitSupportingJson: text("orbit_supporting_json").notNull().default("[]"), stemPocMinutes: integer("stem_poc_minutes").notNull().default(0), tacMinutes: integer("tac_minutes").notNull().default(0), orbitEvidence: text("orbit_evidence").notNull().default(""),
   isSample: integer("is_sample", { mode: "boolean" }).notNull().default(false), createdAt: text("created_at").notNull(), modifiedAt: text("modified_at").notNull(),
-});
+}, (table) => [
+  index("idx_work_records_activity_date").on(table.activityDate),
+  index("idx_work_records_follow_up_date").on(table.followUpDate),
+  index("idx_work_records_orbit_date").on(table.orbitReportable, table.activityDate),
+]);
