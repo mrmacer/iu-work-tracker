@@ -8,6 +8,7 @@ import {
 } from "../lib/data-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
+import DevMicrosoftConnection from "./DevMicrosoftConnection";
 
 type View = "home" | "today" | "history" | "projects" | "orbit";
 const navItems: [View, string, string][] = [
@@ -316,9 +317,7 @@ function Header({
         <button className="header-log" onClick={onLog}>
           + Log work
         </button>
-        <button className="avatar" aria-label="Account options">
-          GM
-        </button>
+        <DevMicrosoftConnection />
       </div>
     </header>
   );
