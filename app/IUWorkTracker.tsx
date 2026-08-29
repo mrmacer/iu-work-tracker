@@ -2,8 +2,9 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
-  ApiDataProvider,
   PrototypeFallbackProvider,
+  selectDataProvider,
+  type ActiveProviderKind,
   type DataProvider,
 } from "../lib/data-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
@@ -84,8 +85,8 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [storageMode, setStorageMode] = useState<"connected" | "fallback">(
-    "connected",
+  const [storageMode, setStorageMode] = useState<ActiveProviderKind | "fallback">(
+    "api",
   );
   const [logging, setLogging] = useState(false);
   const [draft, setDraft] = useState<WorkRecord>(emptyRecord);
@@ -95,7 +96,7 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
   const [search, setSearch] = useState("");
   const [draftBaseline, setDraftBaseline] = useState("");
   const opener = useRef<HTMLElement | null>(null);
-  const provider = useRef<DataProvider>(dataProvider ?? new ApiDataProvider());
+  const provider = useRef<DataProvider | null>(dataProvider ?? null);
   useEffect(() => {
     let live = true;
     const load = async () => {
@@ -110,17 +111,27 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
           setReferences({ projects, organizations, contacts, categories, deliverables, reportingConfig, settings });
         }
       };
+      let kind: ActiveProviderKind | "fallback" = "api";
       try {
+        if (!provider.current) {
+          const selected = await selectDataProvider();
+          provider.current = selected.provider;
+          kind = selected.kind;
+        }
         await loadFrom(provider.current);
       } catch {
+        // Selecting or loading from the active provider failed (including a SharePoint
+        // initialization failure). Fall back to the safe in-memory prototype without
+        // touching whatever the failed provider holds.
         const fallback = new PrototypeFallbackProvider();
         provider.current = fallback;
-        if (live) {
-          setStorageMode("fallback");
-        }
+        kind = "fallback";
         await loadFrom(fallback);
       } finally {
-        if (live) setLoading(false);
+        if (live) {
+          setStorageMode(kind);
+          setLoading(false);
+        }
       }
     };
     void load();
@@ -171,12 +182,17 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
       setSaveError("Add a title, activity type, and duration before saving.");
       return;
     }
+    const activeProvider = provider.current;
+    if (!activeProvider) {
+      setSaveError("The data store is still starting up. Try again in a moment.");
+      return;
+    }
     setSaving(true);
     setSaveError("");
     const pending: WorkRecord = { ...draft, title: draft.title.trim(), metadata: { ...draft.metadata, syncState: "saving" } };
     const result = draft.metadata.version > 0
-      ? await provider.current.updateWorkRecord(pending, draft.metadata.version)
-      : await provider.current.createWorkRecord(pending);
+      ? await activeProvider.updateWorkRecord(pending, draft.metadata.version)
+      : await activeProvider.createWorkRecord(pending);
     try {
       if (result.status !== "success") {
         setSaveError(result.status === "validation_error" ? result.errors[0]?.message ?? "Check the record and try again." : result.message);
@@ -261,9 +277,11 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
       <footer className="os-status">
         <span>
           <i />{" "}
-          {storageMode === "connected"
-            ? "Prototype data store connected"
-            : "Preview session active"}
+          {storageMode === "sharepoint"
+            ? "SharePoint DEV connected"
+            : storageMode === "api"
+              ? "Prototype data store connected"
+              : "Preview session active"}
         </span>
         <span>Log it once. Use it everywhere.</span>
       </footer>

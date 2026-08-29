@@ -1,6 +1,23 @@
+import type { AccountInfo } from "@azure/msal-browser";
 import type { Category, Contact, Deliverable, Organization, Project, ReferenceData, ReportingConfig, SystemSettings, WorkRecord } from "./models";
+import {
+  createBrowserMicrosoftAuthController,
+  InteractiveRedirectStartedError,
+  type MicrosoftAuthController,
+} from "./microsoft-auth";
+import { readDevMicrosoftConfig } from "./microsoft-auth-config";
 import { REFERENCE_DATA } from "./reference-data";
 import { SAMPLE_RECORDS } from "./sample-data";
+import {
+  createWorkRecordItem,
+  findWorkRecordByAppId,
+  listWorkRecords,
+  resolveWorkRecordItem,
+  SharePointWorkRecordsError,
+  updateWorkRecordItem,
+  validateSharePointTextLimits,
+  type SharePointWorkRecordConfig,
+} from "./sharepoint-work-records";
 import { validateWorkRecord, type ValidationIssue } from "./validation";
 
 export type ProviderResult<T> =
@@ -102,3 +119,138 @@ export class MemoryDataProvider extends ReferenceProvider implements DataProvide
 }
 
 export class PrototypeFallbackProvider extends MemoryDataProvider {}
+
+/**
+ * DEV-only Work Record persistence against the verified DEV SharePoint site, using the
+ * existing delegated Microsoft sign-in (see docs/DELEGATED_AUTH_SETUP.md and
+ * docs/AI_HANDOFF.md "DEV vs PRODUCTION"). Reference/configuration data intentionally
+ * continues to come from the same static seed data every other provider uses; those six
+ * lists are steward-owned reference data, not part of this integration phase's scope.
+ */
+export class DelegatedSharePointDataProvider extends ReferenceProvider implements DataProvider {
+  constructor(
+    private readonly controller: MicrosoftAuthController,
+    private readonly account: AccountInfo,
+    private readonly config: SharePointWorkRecordConfig,
+  ) {
+    super();
+  }
+
+  private token(): Promise<string> {
+    return this.controller.acquireGraphToken(this.account);
+  }
+
+  async getWorkRecords(): Promise<ProviderResult<WorkRecord[]>> {
+    try {
+      const token = await this.token();
+      const records = await listWorkRecords(this.config, token);
+      records.sort(
+        (a, b) =>
+          b.activityDate.localeCompare(a.activityDate) ||
+          b.metadata.createdAt.localeCompare(a.metadata.createdAt),
+      );
+      return { status: "success", value: records };
+    } catch (error) {
+      return this.toErrorResult<WorkRecord[]>(error);
+    }
+  }
+
+  async createWorkRecord(record: WorkRecord): Promise<ProviderResult<WorkRecord>> {
+    const validated = validateWorkRecord(record, this.references);
+    if (!validated.valid) return { status: "validation_error", errors: validated.issues };
+    const limitIssues = validateSharePointTextLimits(record);
+    if (limitIssues.length) return { status: "validation_error", errors: limitIssues };
+    try {
+      const token = await this.token();
+      const existing = await findWorkRecordByAppId(this.config, token, record.appId);
+      if (existing) {
+        return { status: "conflict", current: existing.record, message: "A record with this application ID already exists." };
+      }
+      const saved = await createWorkRecordItem(this.config, token, record);
+      return { status: "success", value: saved };
+    } catch (error) {
+      return this.toErrorResult<WorkRecord>(error);
+    }
+  }
+
+  async updateWorkRecord(record: WorkRecord, expectedVersion: number): Promise<ProviderResult<WorkRecord>> {
+    const validated = validateWorkRecord(record, this.references);
+    if (!validated.valid) return { status: "validation_error", errors: validated.issues };
+    const limitIssues = validateSharePointTextLimits(record);
+    if (limitIssues.length) return { status: "validation_error", errors: limitIssues };
+    try {
+      const token = await this.token();
+      const resolved = await resolveWorkRecordItem(this.config, token, record);
+      if (!resolved) return { status: "persistence_error", message: "The record no longer exists." };
+      if (resolved.record.metadata.version !== expectedVersion) {
+        return {
+          status: "conflict",
+          current: resolved.record,
+          message: "This record was changed after you opened it. Your draft is still available.",
+        };
+      }
+      const saved = await updateWorkRecordItem(
+        this.config,
+        token,
+        resolved.itemId,
+        resolved.etag,
+        record,
+        expectedVersion + 1,
+      );
+      return { status: "success", value: saved };
+    } catch (error) {
+      if (error instanceof SharePointWorkRecordsError && error.kind === "conflict" && error.current) {
+        return {
+          status: "conflict",
+          current: error.current,
+          message: "This record was changed after you opened it. Your draft is still available.",
+        };
+      }
+      return this.toErrorResult<WorkRecord>(error);
+    }
+  }
+
+  private toErrorResult<T>(error: unknown): ProviderResult<T> {
+    if (error instanceof InteractiveRedirectStartedError) {
+      return { status: "network_error", message: "Microsoft sign-in confirmation is required. Finish signing in, then try again." };
+    }
+    if (error instanceof SharePointWorkRecordsError) {
+      return error.kind === "auth"
+        ? { status: "network_error", message: error.message }
+        : { status: "persistence_error", message: error.message };
+    }
+    return { status: "network_error", message: "The DEV SharePoint data store could not be reached." };
+  }
+}
+
+export type ActiveProviderKind = "sharepoint" | "api";
+
+/**
+ * DEV SharePoint provider selection. The prototype ApiDataProvider (and its existing
+ * PrototypeFallbackProvider safety net in app/IUWorkTracker.tsx) remains the default and the
+ * safe fallback. The SharePoint provider activates only when DEV Microsoft/SharePoint
+ * configuration is present AND a Microsoft account is already signed in — this never
+ * triggers an interactive sign-in prompt on its own.
+ */
+export async function selectDataProvider(): Promise<{ provider: DataProvider; kind: ActiveProviderKind }> {
+  if (typeof window === "undefined") return { provider: new ApiDataProvider(), kind: "api" };
+
+  const config = readDevMicrosoftConfig();
+  const siteId = process.env.NEXT_PUBLIC_SHAREPOINT_SITE_ID?.trim();
+  const workRecordsListId = process.env.NEXT_PUBLIC_SHAREPOINT_IU_WORK_RECORDS_LIST_ID?.trim();
+  if (config.status !== "enabled" || !siteId || !workRecordsListId) {
+    return { provider: new ApiDataProvider(), kind: "api" };
+  }
+
+  try {
+    const controller = createBrowserMicrosoftAuthController(config.value, window.location.origin);
+    const account = await controller.initialize();
+    if (!account) return { provider: new ApiDataProvider(), kind: "api" };
+    return {
+      provider: new DelegatedSharePointDataProvider(controller, account, { siteId, workRecordsListId }),
+      kind: "sharepoint",
+    };
+  } catch {
+    return { provider: new ApiDataProvider(), kind: "api" };
+  }
+}

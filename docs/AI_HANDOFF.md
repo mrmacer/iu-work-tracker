@@ -68,39 +68,40 @@ No synthetic smoke-test Work Record should remain.
 
 ## CRITICAL CURRENT PERSISTENCE STATE
 
-THE APPLICATION IS STILL USING THE PROTOTYPE DATA PROVIDER.
+`DelegatedSharePointDataProvider` IS NOW IMPLEMENTED AND LIVE-VERIFIED IN DEV.
 
-SharePoint infrastructure exists and has been verified, but normal IU Work Tracker Work Records are NOT yet persisted to SharePoint.
+See docs/SHAREPOINT_PROVIDER_INTEGRATION_REPORT.md for full detail. Summary:
+
+- Normal application actions (Log Work: create and update) now persist through the existing `DataProvider` boundary into live DEV SharePoint `IU_Work_Records` when a Microsoft account is signed in under DEV configuration.
+- Provider selection (`selectDataProvider()` in `lib/data-provider.ts`) is explicit and non-interactive: SharePoint activates only when DEV config is present AND a Microsoft account is already signed in; it never forces a sign-in prompt.
+- The prototype `ApiDataProvider` remains the default for every user who is not signed in, and remains the automatic fallback if the SharePoint provider fails to load for any reason. It has not been removed or bypassed, and was not asked to be.
+- Live end-to-end verification (create → update including ORBIT presence → confirm via Graph → delete → confirm 404) was completed successfully against `https://siu29.sharepoint.com/sites/IUWorkTrackerDEV` through the normal Log Work UI. No synthetic data was left behind.
+- Reference/configuration data (Projects, Organizations, Contacts, Categories, Deliverables, ReportingConfig, SystemSettings) still comes from static seed data even when SharePoint is the active Work Records provider — reading those six lists from SharePoint was explicitly out of scope for this phase.
+- This is DEV-only and single-user-verified. It does not itself authorize production use; production still requires the separately-planned `Sites.Selected` application-permission architecture (see "DEV vs PRODUCTION" below).
 
 Do not confuse:
 
-"SharePoint works"
+"SharePoint works and is wired into the app in DEV"
 
 with:
 
-"The application is using SharePoint."
+"The application is in production-ready cutover to SharePoint."
 
-Those are not yet the same thing.
-
-Do not remove or bypass the prototype provider until the next provider integration is explicitly implemented and verified.
+Those are not the same thing.
 
 ---
 
 ## Next Development Goal
 
-The next major phase is:
+WAIT FOR EXPLICIT USER INSTRUCTION.
 
-CONNECT THE EXISTING DATAPROVIDER ARCHITECTURE TO VERIFIED DEV SHAREPOINT.
+Candidate next phases (none authorized to begin automatically):
 
-Expected direction:
+- Broader DEV verification: multiple concurrent users/records, Graph throttling/retry behavior, pagination beyond one page.
+- Reading the six reference/configuration lists from SharePoint instead of static seed data.
+- Evaluating production readiness: `Sites.Selected` application-permission architecture, confidential server-side app registration, migration planning per docs/SHAREPOINT_INTEGRATION_PLAN.md §18-20.
 
-DelegatedSharePointDataProvider
-
-The goal is for normal application actions such as Log Work to persist through the existing DataProvider boundary into the verified DEV SharePoint lists.
-
-This should be a focused integration phase.
-
-DO NOT begin this phase unless explicitly instructed.
+DO NOT begin any of these unless explicitly instructed.
 
 ---
 
@@ -301,11 +302,9 @@ Do not commit broken or unknown state merely to make the working tree clean.
 
 ## Last Verified Milestone
 
-DEV SharePoint infrastructure and Graph CRUD/concurrency behavior verified.
+`DelegatedSharePointDataProvider` implemented, unit-tested (64/64 tests, build, typecheck, lint clean on all files touched), and live-verified end-to-end through the normal Log Work UI against DEV SharePoint: create, update (including ORBIT presence), Graph-side confirmation of every field/timestamp/version rule, delete, and confirmed HTTP 404 afterward. No synthetic data left behind. See docs/SHAREPOINT_PROVIDER_INTEGRATION_REPORT.md.
 
-Synthetic Graph smoke-test record permanently deleted and confirmed unavailable via HTTP 404.
-
-Application persistence remains on the prototype provider.
+The prototype `ApiDataProvider` remains the default/fallback provider by design.
 
 ---
 
@@ -313,4 +312,4 @@ Application persistence remains on the prototype provider.
 
 WAIT FOR EXPLICIT USER INSTRUCTION.
 
-Do not begin DelegatedSharePointDataProvider implementation automatically.
+Do not begin any further SharePoint integration phase (reference-data lists, production `Sites.Selected` planning, broader concurrency/multi-user testing) automatically.
