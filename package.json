@@ -15,10 +15,12 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "0.122.0",
     "@azure/msal-browser": "5.19.0",
     "drizzle-orm": "0.45.2",
     "react": "19.2.6",
-    "react-dom": "19.2.6"
+    "react-dom": "19.2.6",
+    "zod": "4.5.2"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

@@ -10,14 +10,16 @@ import {
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
+import InboxIntelligence from "./InboxIntelligence";
 
-type View = "home" | "today" | "history" | "projects" | "orbit";
+type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox";
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
   ["history", "≡", "History"],
   ["projects", "▤", "Projects"],
   ["orbit", "◎", "STEM / ORBIT"],
+  ["inbox", "✉", "Inbox Intelligence"],
 ];
 const todayIso = () =>
   new Intl.DateTimeFormat("en-CA", {
@@ -269,8 +271,10 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
             />
           ) : view === "projects" ? (
             <Projects records={records} setView={setView} projects={references.projects} />
-          ) : (
+          ) : view === "orbit" ? (
             <Orbit records={records} references={references} />
+          ) : (
+            <InboxIntelligence references={references} openLog={openLog} createDraftRecord={emptyRecord} />
           )}
         </section>
       </div>
@@ -508,6 +512,12 @@ function Home({
           title="STEM / ORBIT"
           copy="Review reporting progress"
           onClick={() => setView("orbit")}
+        />
+        <Command
+          icon="✉"
+          title="Inbox Intelligence"
+          copy="Turn a pasted email into a work record"
+          onClick={() => setView("inbox")}
         />
       </div>
     </div>

@@ -105,53 +105,22 @@ DO NOT begin any of these unless explicitly instructed.
 
 ---
 
-## Future Candidate Feature — NOT CURRENT SCOPE
+## Inbox Intelligence V1 — GREEN
 
-A future feature under consideration is:
+Authorized and implemented; one live AI test completed successfully. Full detail: docs/INBOX_INTELLIGENCE_V1_REPORT.md.
 
-INBOX INTELLIGENCE
+Summary:
 
-Concept:
+- One new kiosk screen (`app/InboxIntelligence.tsx`) plus one new server route (`app/api/inbox-intelligence/route.ts`) implement PASTE EMAIL → ANALYZE WITH AI → HUMAN REVIEW → SAVE (session-only) → optionally CREATE WORK RECORD, entirely inside IU Work Tracker.
+- The Anthropic API key (`ANTHROPIC_API_KEY`) is read server-side only via the Cloudflare Workers `env` binding, exactly like `env.DB`. It is never a `NEXT_PUBLIC_*` variable. Verified structurally (client bundle grepped, zero matches) and live (the browser's network log showed only calls to the app's own `/api/inbox-intelligence` route, never to `api.anthropic.com`).
+- AI output is never automatically persisted. Structured extraction uses the Anthropic TypeScript SDK's `messages.parse()` + a strict Zod schema; a response that fails validation is surfaced as an error, never fabricated.
+- Persistence is session-only (`SessionInboxIntelligenceProvider`, in-memory) — no SharePoint list has been provisioned for this record type. A proposed `IU_Inbox_Intelligence` schema is documented in the report for a future phase's review, not provisioned.
+- Creating a Work Record from an analyzed email reuses the existing, unmodified `DataProvider`/Log Work wizard path (`openLog()` + `buildWorkRecordDraftFromAnalysis()`); the user must still review and explicitly save.
+- 89/89 automated tests pass; every test mocks the Anthropic client — no automated test makes a real API call.
+- **One live, paid Anthropic API call was made** with a non-sensitive synthetic email (a made-up grant-deadline message, no real IU data). It succeeded end-to-end: structured extraction validated against the schema, every field (summary, priority, needsAttention, two correctly-dated action items, follow-up, tags, people/organizations/districts/projects, suggested Work Record) rendered correctly for review, and model/token diagnostics were captured (`claude-opus-5 · 2,373 in / 732 out tokens`). Confirmed live that nothing was persisted automatically at any layer (raw email, Inbox Intelligence record, or Work Record) — everything requires an explicit user click.
+- An earlier attempt with a placeholder (non-real) key failed safely at authentication with no credential exposed, before the real key was supplied; only one call reached the model.
 
-Paste an email or email thread into IU Work Tracker.
-
-AI analyzes it and may extract:
-
-- summary
-- priority
-- action items
-- follow-up
-- timing/due date
-- people
-- organizations
-- district/LEA
-- related project
-- related work category
-- potential Work Record connection
-
-Potential workflow:
-
-PASTE EMAIL
-→ ANALYZE
-→ HUMAN REVIEW
-→ SAVE TO INBOX
-→ optionally CREATE WORK ITEM
-
-A standalone prototype named:
-
-email-kb-capture.html
-
-was created as an exploratory concept.
-
-DO NOT treat that standalone prototype as the desired production architecture.
-
-Preferred direction is eventual integration into IU Work Tracker rather than creating a second dashboard/database/authentication/storage system.
-
-Initial implementation should likely remain manual copy/paste.
-
-Possible future Microsoft Graph Outlook integration may be evaluated separately.
-
-DO NOT request Mail.Read or other mailbox permissions without explicit authorization.
+DO NOT request Mail.Read or other mailbox permissions. DO NOT integrate Microsoft Graph/Outlook. DO NOT provision the proposed SharePoint list without separate explicit instruction. DO NOT treat session-only persistence as durable — it is not.
 
 ---
 
