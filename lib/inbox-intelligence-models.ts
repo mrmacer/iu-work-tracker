@@ -128,3 +128,48 @@ export function resolveEmailAnalysisEntities(analysis: EmailAnalysis, references
     projectIds: dedupe(analysis.projects.map((name) => matchExactName(name, references.projects))),
   };
 }
+
+/**
+ * Builds a fresh, unsaved durable record from a reviewed analysis. `metadata.version` stays
+ * `0` so the provider's create()/update() branch (mirroring app/IUWorkTracker.tsx's own
+ * save()) always routes a first save through create(), never update(). Pure: performs no
+ * I/O and never touches the raw email — only the already-derived analysis and excerpt.
+ */
+export function buildInboxIntelligenceRecord(
+  analysis: EmailAnalysis,
+  sourceExcerpt: string,
+  references: ReferenceData,
+  analyzedAt: string,
+): InboxIntelligenceRecord {
+  const matches = resolveEmailAnalysisEntities(analysis, references);
+  return {
+    appId: crypto.randomUUID(),
+    schemaVersion: INBOX_INTELLIGENCE_SCHEMA_VERSION,
+    sourceType: "pasted-email",
+    analyzedAt,
+    sourceExcerpt,
+    analysis,
+    matchedOrganizationIds: matches.organizationIds,
+    matchedDistrictIds: matches.districtIds,
+    matchedProjectIds: matches.projectIds,
+    status: "open",
+    resolvedAt: null,
+    linkedWorkRecordAppId: null,
+    metadata: { version: 0, createdAt: "", modifiedAt: "", syncState: "saved" },
+  };
+}
+
+export type InboxIntelligenceSummary = {
+  openCount: number;
+  waitingCount: number;
+  resolvedCount: number;
+};
+
+/** "Needs attention" on the Home kiosk card and the Inbox view's sections both derive from `status`. */
+export function computeInboxIntelligenceSummary(records: InboxIntelligenceRecord[]): InboxIntelligenceSummary {
+  return {
+    openCount: records.filter((record) => record.status === "open").length,
+    waitingCount: records.filter((record) => record.status === "waiting").length,
+    resolvedCount: records.filter((record) => record.status === "resolved").length,
+  };
+}

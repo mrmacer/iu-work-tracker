@@ -7,6 +7,12 @@ import {
   type ActiveProviderKind,
   type DataProvider,
 } from "../lib/data-provider";
+import { computeInboxIntelligenceSummary, type InboxIntelligenceRecord } from "../lib/inbox-intelligence-models";
+import {
+  selectInboxIntelligenceProvider,
+  type InboxIntelligenceProvider,
+  type InboxIntelligenceResult,
+} from "../lib/inbox-intelligence-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
@@ -99,6 +105,45 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
   const [draftBaseline, setDraftBaseline] = useState("");
   const opener = useRef<HTMLElement | null>(null);
   const provider = useRef<DataProvider | null>(dataProvider ?? null);
+  const onSavedRef = useRef<((saved: WorkRecord) => void) | null>(null);
+  const inboxProvider = useRef<InboxIntelligenceProvider | null>(null);
+  const [inboxRecords, setInboxRecords] = useState<InboxIntelligenceRecord[]>([]);
+  useEffect(() => {
+    // Independent of the Work Record load above: a failure here never affects Work Records,
+    // and vice versa. This is a read-only list() call — zero Anthropic calls, matching
+    // docs/INBOX_INTELLIGENCE_SHAREPOINT_REPORT.md "AI cost control".
+    let live = true;
+    (async () => {
+      const selected = await selectInboxIntelligenceProvider();
+      inboxProvider.current = selected.provider;
+      const result = await selected.provider.list();
+      if (live && result.status === "success") setInboxRecords(result.value);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
+    const active = inboxProvider.current;
+    if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
+    const result = await active.create(record);
+    if (result.status === "success") {
+      setInboxRecords((current) => [result.value, ...current.filter((item) => item.appId !== result.value.appId)]);
+    }
+    return result;
+  };
+  const updateInboxRecord = async (
+    record: InboxIntelligenceRecord,
+    expectedVersion: number,
+  ): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
+    const active = inboxProvider.current;
+    if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
+    const result = await active.update(record, expectedVersion);
+    if (result.status === "success") {
+      setInboxRecords((current) => current.map((item) => (item.appId === result.value.appId ? result.value : item)));
+    }
+    return result;
+  };
   useEffect(() => {
     let live = true;
     const load = async () => {
@@ -154,9 +199,10 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
     .sort((a, b) =>
       String(a.followUpDate).localeCompare(String(b.followUpDate)),
     );
-  const openLog = (record?: WorkRecord) => {
+  const openLog = (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => {
     const next = record ? structuredClone(record) : emptyRecord();
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    onSavedRef.current = onSaved ?? null;
     setDraft(next);
     setDraftBaseline(JSON.stringify(next));
     setStep(1);
@@ -206,6 +252,8 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
           (a, b) => b.activityDate.localeCompare(a.activityDate),
         ),
       );
+      onSavedRef.current?.(saved);
+      onSavedRef.current = null;
       if (another) {
         const next = emptyRecord();
         setDraft(next);
@@ -226,6 +274,7 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
   const requestClose = () => {
     const dirty = JSON.stringify(draft) !== draftBaseline;
     if (dirty && !window.confirm("Discard the changes in this work entry?")) return;
+    onSavedRef.current = null;
     setLogging(false);
   };
   return (
@@ -252,6 +301,7 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
               openLog={openLog}
               setView={setView}
               references={references}
+              inboxOpenCount={computeInboxIntelligenceSummary(inboxRecords).openCount}
             />
           ) : view === "today" ? (
             <Today
@@ -274,7 +324,14 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
           ) : view === "orbit" ? (
             <Orbit records={records} references={references} />
           ) : (
-            <InboxIntelligence references={references} openLog={openLog} createDraftRecord={emptyRecord} />
+            <InboxIntelligence
+              references={references}
+              openLog={openLog}
+              createDraftRecord={emptyRecord}
+              records={inboxRecords}
+              saveRecord={saveInboxRecord}
+              updateRecord={updateInboxRecord}
+            />
           )}
         </section>
       </div>
@@ -387,6 +444,7 @@ function Home({
   openLog,
   setView,
   references,
+  inboxOpenCount,
 }: {
   records: WorkRecord[];
   todayRecords: WorkRecord[];
@@ -395,6 +453,7 @@ function Home({
   openLog: (r?: WorkRecord) => void;
   setView: (v: View) => void;
   references: ReferenceData;
+  inboxOpenCount: number;
 }) {
   const latest = todayRecords.slice(0, 3);
   return (
@@ -516,7 +575,7 @@ function Home({
         <Command
           icon="✉"
           title="Inbox Intelligence"
-          copy="Turn a pasted email into a work record"
+          copy={inboxOpenCount > 0 ? `${inboxOpenCount} need attention` : "Turn a pasted email into a work record"}
           onClick={() => setView("inbox")}
         />
       </div>

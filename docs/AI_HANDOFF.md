@@ -124,6 +124,23 @@ DO NOT request Mail.Read or other mailbox permissions. DO NOT integrate Microsof
 
 ---
 
+## Inbox Intelligence V1.1 — GREEN
+
+Authorized, implemented, provisioned manually, and live-verified in DEV. Full detail: `docs/INBOX_INTELLIGENCE_SHAREPOINT_REPORT.md`.
+
+- `IU_Inbox_Intelligence` exists at list ID `892dbe47-6fa2-42f0-b9c4-1ed7a3664737` with the exact approved §23 schema: canonical built-in internal field `Title`, 24 approved custom columns, unique/indexed `AppId`, exact defaults/choices/date settings, and no application Lookup fields.
+- `.env.local` configures `NEXT_PUBLIC_SHAREPOINT_IU_INBOX_INTELLIGENCE_LIST_ID`, so a signed-in DEV session selects `DelegatedSharePointInboxIntelligenceProvider`; unsigned/non-DEV contexts retain the session fallback.
+- Live normal-UI verification passed: **Save to Inbox → Graph read-back → full application reload → open→waiting → waiting→resolved → resolved→open (reopen)**.
+- `RecordVersion` advanced `1→2→3→4`; the SharePoint ETag advanced on every update. `Created` remained unchanged and `Modified` advanced each time.
+- Action-item JSON and all extracted/matched relationship JSON arrays round-tripped exactly.
+- No raw email/body/thread/signature, Anthropic payload, or API credential was persisted. The live persistence run made zero Anthropic API calls.
+- The exact synthetic item was removed; its subsequent item lookup returned `itemNotFound`/HTTP 404 and the list returned to zero items.
+- Production persistence/authentication remains out of scope; this is DEV-only and single-user-verified.
+
+Do not reprovision or alter this list schema, broaden Entra permissions, or begin production cutover without explicit instruction.
+
+---
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:

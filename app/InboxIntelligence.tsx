@@ -1,11 +1,17 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useState } from "react";
 import { MAX_EMAIL_LENGTH } from "../lib/anthropic-config";
 import type { AnalyzeEmailResult, AnalyzeEmailUsage } from "../lib/anthropic-email-analysis";
 import { buildWorkRecordDraftFromAnalysis } from "../lib/inbox-intelligence-work-record";
-import type { EmailAnalysis, InboxIntelligenceRecord } from "../lib/inbox-intelligence-models";
-import { SessionInboxIntelligenceProvider } from "../lib/inbox-intelligence-provider";
+import {
+  buildInboxIntelligenceRecord,
+  computeInboxIntelligenceSummary,
+  type EmailAnalysis,
+  type InboxIntelligenceRecord,
+  type InboxIntelligenceStatus,
+} from "../lib/inbox-intelligence-models";
+import type { InboxIntelligenceResult } from "../lib/inbox-intelligence-provider";
 import type { ReferenceData, WorkRecord } from "../lib/models";
 
 type Phase = "paste" | "review" | "saved";
@@ -22,16 +28,33 @@ function csvToList(value: string): string[] {
     .filter(Boolean);
 }
 
+function resultMessage(result: InboxIntelligenceResult<unknown>): string {
+  if (result.status === "success") return "";
+  if (result.status === "validation_error") return result.errors[0]?.message ?? "Check the record and try again.";
+  return result.message;
+}
+
+function lastModified(record: InboxIntelligenceRecord): string {
+  return new Intl.DateTimeFormat("en-US", { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }).format(
+    new Date(record.metadata.modifiedAt),
+  );
+}
+
 export default function InboxIntelligence({
   references,
   openLog,
   createDraftRecord,
+  records,
+  saveRecord,
+  updateRecord,
 }: {
   references: ReferenceData;
-  openLog: (record?: WorkRecord) => void;
+  openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
   createDraftRecord: () => WorkRecord;
+  records: InboxIntelligenceRecord[];
+  saveRecord: (record: InboxIntelligenceRecord) => Promise<InboxIntelligenceResult<InboxIntelligenceRecord>>;
+  updateRecord: (record: InboxIntelligenceRecord, expectedVersion: number) => Promise<InboxIntelligenceResult<InboxIntelligenceRecord>>;
 }) {
-  const provider = useRef(new SessionInboxIntelligenceProvider());
   const [phase, setPhase] = useState<Phase>("paste");
   const [rawEmail, setRawEmail] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -39,10 +62,14 @@ export default function InboxIntelligence({
   const [analysis, setAnalysis] = useState<EmailAnalysis | null>(null);
   const [usage, setUsage] = useState<AnalyzeEmailUsage | null>(null);
   const [sourceExcerpt, setSourceExcerpt] = useState("");
-  // Mirrors the session-only provider's contents so render never reads ref.current directly.
-  const [recent, setRecent] = useState<InboxIntelligenceRecord[]>([]);
-  const needsAttentionCount = recent.filter((record) => record.analysis.needsAttention).length;
-  const openActionCount = recent.reduce((sum, record) => sum + record.analysis.actionItems.length, 0);
+  const [analyzedAt, setAnalyzedAt] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
+  const [justSaved, setJustSaved] = useState<InboxIntelligenceRecord | null>(null);
+  const [rowError, setRowError] = useState("");
+  const [busyAppId, setBusyAppId] = useState<string | null>(null);
+
+  const summary = computeInboxIntelligenceSummary(records);
 
   const clearAll = () => {
     setRawEmail("");
@@ -75,6 +102,7 @@ export default function InboxIntelligence({
       setAnalysis(result.analysis);
       setUsage(result.usage);
       setSourceExcerpt(excerpt(rawEmail));
+      setAnalyzedAt(new Date().toISOString());
       setPhase("review");
     } catch {
       setError("The AI service could not be reached. Check your connection and try again.");
@@ -91,26 +119,50 @@ export default function InboxIntelligence({
     setAnalysis(null);
     setUsage(null);
     setSourceExcerpt("");
+    setJustSaved(null);
+    setSaveError("");
     clearAll();
   };
 
-  const save = () => {
-    if (!analysis) return;
-    provider.current.save({
-      appId: crypto.randomUUID(),
-      createdAt: new Date().toISOString(),
-      sourceExcerpt,
-      analysis,
-      linkedWorkRecordAppId: null,
-    });
-    setRecent(provider.current.list());
+  const saveToInbox = async () => {
+    if (!analysis || saving) return; // one Save click, no re-entrancy — generates zero Anthropic calls
+    setSaving(true);
+    setSaveError("");
+    const record = buildInboxIntelligenceRecord(analysis, sourceExcerpt, references, analyzedAt);
+    const result = await saveRecord(record);
+    setSaving(false);
+    if (result.status !== "success") {
+      setSaveError(resultMessage(result));
+      return;
+    }
+    setJustSaved(result.value);
     setPhase("saved");
   };
 
-  const createWorkRecord = () => {
-    if (!analysis) return;
-    const draft = buildWorkRecordDraftFromAnalysis(analysis, references, createDraftRecord());
-    openLog(draft);
+  const createWorkRecordFrom = (record: InboxIntelligenceRecord) => {
+    const draft = buildWorkRecordDraftFromAnalysis(record.analysis, references, createDraftRecord());
+    openLog(draft, (savedWorkRecord) => {
+      void linkWorkRecord(record, savedWorkRecord.appId);
+    });
+  };
+
+  const linkWorkRecord = async (record: InboxIntelligenceRecord, workRecordAppId: string) => {
+    const result = await updateRecord({ ...record, linkedWorkRecordAppId: workRecordAppId }, record.metadata.version);
+    if (result.status !== "success") {
+      setRowError(`The Work Record was created, but linking it back to this Inbox item failed: ${resultMessage(result)}`);
+    }
+  };
+
+  const updateStatus = async (record: InboxIntelligenceRecord, status: InboxIntelligenceStatus) => {
+    if (busyAppId) return;
+    setBusyAppId(record.appId);
+    setRowError("");
+    const result = await updateRecord(
+      { ...record, status, resolvedAt: status === "resolved" ? new Date().toISOString() : null },
+      record.metadata.version,
+    );
+    setBusyAppId(null);
+    if (result.status !== "success") setRowError(resultMessage(result));
   };
 
   return (
@@ -119,14 +171,14 @@ export default function InboxIntelligence({
         <div>
           <p className="eyebrow">AI-assisted intake</p>
           <h1>Inbox Intelligence</h1>
-          <p>Paste a work email. Review what AI finds. Decide what becomes a work record.</p>
+          <p>Paste a work email. Review what AI finds. Track it until it&rsquo;s resolved.</p>
         </div>
       </div>
 
       <div className="metric-strip">
-        <Metric value={String(needsAttentionCount)} label="needs attention" />
-        <Metric value={String(openActionCount)} label="open actions" />
-        <Metric value={String(recent.length)} label="analyzed this session" />
+        <Metric value={String(summary.openCount)} label="needs attention" />
+        <Metric value={String(summary.waitingCount)} label="waiting" />
+        <Metric value={String(summary.resolvedCount)} label="resolved" />
       </div>
 
       {phase === "paste" && (
@@ -311,58 +363,189 @@ export default function InboxIntelligence({
                 Model: {usage.model} · {usage.inputTokens.toLocaleString()} in / {usage.outputTokens.toLocaleString()} out tokens
               </p>
             )}
+            {saveError && (
+              <div className="form-error" role="alert">
+                {saveError}
+              </div>
+            )}
           </div>
           <footer className="log-footer">
-            <button className="ghost-button" onClick={startOver}>
+            <button className="ghost-button" onClick={startOver} disabled={saving}>
               Discard
             </button>
-            <button className="primary-action" onClick={save}>
-              Save
+            <button className="primary-action" onClick={() => void saveToInbox()} disabled={saving}>
+              {saving ? "Saving…" : "Save to Inbox"}
             </button>
           </footer>
         </section>
       )}
 
-      {phase === "saved" && analysis && (
+      {phase === "saved" && justSaved && (
         <section className="panel">
           <div className="non-orbit-note">
             <span>✓</span>
             <div>
-              <strong>Saved for this session.</strong>
-              <p>This intelligence record is not yet a Work Record. Create one below if this email should become one.</p>
+              <strong>Saved to Inbox.</strong>
+              <p>This intelligence record now appears below. Create a Work Record from it any time.</p>
             </div>
           </div>
           <footer className="log-footer">
             <button className="ghost-button" onClick={startOver}>
               Analyze another email
             </button>
-            <button className="primary-action" onClick={createWorkRecord}>
+            <button className="primary-action" onClick={() => createWorkRecordFrom(justSaved)}>
               Create Work Record
             </button>
           </footer>
         </section>
       )}
 
-      <section className="panel list-panel">
-        <div className="panel-heading">
-          <h2>Recently analyzed</h2>
-          <span className="sample-label">This session only</span>
+      {rowError && (
+        <div className="form-error" role="alert">
+          {rowError}
         </div>
-        {recent.length ? (
-          recent.slice(0, 5).map((record) => (
-            <div className="record-row" key={record.appId} style={{ cursor: "default" }}>
-              <span className={`record-dot ${record.analysis.needsAttention ? "iu" : "orbit"}`} />
-              <span>
-                <strong>{record.analysis.suggestedWorkRecord.title}</strong>
-                <small>{record.sourceExcerpt || record.analysis.summary}</small>
-              </span>
-              <b>{record.analysis.priority}</b>
-            </div>
-          ))
-        ) : (
-          <p className="muted-copy">Nothing analyzed yet this session.</p>
+      )}
+
+      <InboxSection
+        title="Needs attention"
+        records={records.filter((record) => record.status === "open")}
+        busyAppId={busyAppId}
+        onCreateWorkRecord={createWorkRecordFrom}
+        onUpdateStatus={updateStatus}
+        references={references}
+        empty="Nothing needs attention right now."
+      />
+      <InboxSection
+        title="Waiting"
+        records={records.filter((record) => record.status === "waiting")}
+        busyAppId={busyAppId}
+        onCreateWorkRecord={createWorkRecordFrom}
+        onUpdateStatus={updateStatus}
+        references={references}
+        empty="Nothing is waiting on someone else."
+      />
+      <InboxSection
+        title="Recent / resolved"
+        records={records.filter((record) => record.status === "resolved").slice(0, 5)}
+        busyAppId={busyAppId}
+        onCreateWorkRecord={createWorkRecordFrom}
+        onUpdateStatus={updateStatus}
+        references={references}
+        empty="Nothing resolved yet."
+      />
+    </div>
+  );
+}
+
+function InboxSection({
+  title,
+  records,
+  busyAppId,
+  onCreateWorkRecord,
+  onUpdateStatus,
+  references,
+  empty,
+}: {
+  title: string;
+  records: InboxIntelligenceRecord[];
+  busyAppId: string | null;
+  onCreateWorkRecord: (record: InboxIntelligenceRecord) => void;
+  onUpdateStatus: (record: InboxIntelligenceRecord, status: InboxIntelligenceStatus) => void;
+  references: ReferenceData;
+  empty: string;
+}) {
+  return (
+    <section className="panel list-panel">
+      <div className="panel-heading">
+        <h2>{title}</h2>
+        <span className="sample-label">{records.length}</span>
+      </div>
+      {records.length ? (
+        records.map((record) => (
+          <InboxRow
+            key={record.appId}
+            record={record}
+            busy={busyAppId === record.appId}
+            onCreateWorkRecord={onCreateWorkRecord}
+            onUpdateStatus={onUpdateStatus}
+            references={references}
+          />
+        ))
+      ) : (
+        <p className="muted-copy">{empty}</p>
+      )}
+    </section>
+  );
+}
+
+function InboxRow({
+  record,
+  busy,
+  onCreateWorkRecord,
+  onUpdateStatus,
+  references,
+}: {
+  record: InboxIntelligenceRecord;
+  busy: boolean;
+  onCreateWorkRecord: (record: InboxIntelligenceRecord) => void;
+  onUpdateStatus: (record: InboxIntelligenceRecord, status: InboxIntelligenceStatus) => void;
+  references: ReferenceData;
+}) {
+  const relatedProject = record.matchedProjectIds[0]
+    ? references.projects.find((project) => project.appId === record.matchedProjectIds[0])?.name
+    : null;
+  const relatedOrg = record.matchedDistrictIds[0]
+    ? references.organizations.find((org) => org.appId === record.matchedDistrictIds[0])?.name
+    : record.matchedOrganizationIds[0]
+      ? references.organizations.find((org) => org.appId === record.matchedOrganizationIds[0])?.name
+      : null;
+
+  return (
+    <div className="record-row" style={{ cursor: "default", flexWrap: "wrap", minHeight: "auto", padding: "10px 4px" }}>
+      <span className={`record-dot ${record.analysis.needsAttention ? "iu" : "orbit"}`} />
+      <span>
+        <strong>{record.analysis.suggestedWorkRecord.title}</strong>
+        <small>
+          {record.analysis.priority} priority · {record.analysis.actionItems.length} action item
+          {record.analysis.actionItems.length === 1 ? "" : "s"}
+          {record.analysis.followUp ? ` · ${record.analysis.followUp}` : ""}
+          {relatedProject ? ` · ${relatedProject}` : relatedOrg ? ` · ${relatedOrg}` : ""} · updated {lastModified(record)}
+        </small>
+      </span>
+      <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {record.status === "open" && (
+          <>
+            <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "waiting")}>
+              Mark waiting
+            </button>
+            <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "resolved")}>
+              Resolve
+            </button>
+          </>
         )}
-      </section>
+        {record.status === "waiting" && (
+          <>
+            <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "resolved")}>
+              Resolve
+            </button>
+            <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "open")}>
+              Reopen
+            </button>
+          </>
+        )}
+        {record.status === "resolved" && (
+          <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "open")}>
+            Reopen
+          </button>
+        )}
+        {record.linkedWorkRecordAppId ? (
+          <span className="muted-copy">Linked to a Work Record</span>
+        ) : (
+          <button className="ghost-button" disabled={busy} onClick={() => onCreateWorkRecord(record)}>
+            Create Work Record
+          </button>
+        )}
+      </span>
     </div>
   );
 }

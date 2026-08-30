@@ -2,7 +2,12 @@ import { describe, expect, it } from "vitest";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 import { REFERENCE_DATA } from "../lib/reference-data";
 import { buildWorkRecordDraftFromAnalysis } from "../lib/inbox-intelligence-work-record";
-import { EmailAnalysisSchema, type EmailAnalysis, type InboxIntelligenceRecord } from "../lib/inbox-intelligence-models";
+import {
+  buildInboxIntelligenceRecord,
+  computeInboxIntelligenceSummary,
+  EmailAnalysisSchema,
+  type EmailAnalysis,
+} from "../lib/inbox-intelligence-models";
 import { SessionInboxIntelligenceProvider } from "../lib/inbox-intelligence-provider";
 import { validateWorkRecord } from "../lib/validation";
 
@@ -118,38 +123,109 @@ describe("buildWorkRecordDraftFromAnalysis", () => {
   });
 });
 
+describe("buildInboxIntelligenceRecord", () => {
+  it("builds a fresh, unsaved durable record with no raw-email-capable field", () => {
+    const record = buildInboxIntelligenceRecord(analysis(), "a short excerpt", REFERENCE_DATA, "2026-08-29T12:00:00.000Z");
+    expect(record.metadata.version).toBe(0); // provider.create() routes this, never update()
+    expect(record.status).toBe("open");
+    expect(record.resolvedAt).toBeNull();
+    expect(record.linkedWorkRecordAppId).toBeNull();
+    expect(record.sourceType).toBe("pasted-email");
+    expect(record.sourceExcerpt).toBe("a short excerpt");
+    // Exhaustive key check: nothing beyond the documented shape exists (in particular, no rawEmail-shaped field).
+    expect(Object.keys(record).sort()).toEqual(
+      [
+        "appId",
+        "schemaVersion",
+        "sourceType",
+        "analyzedAt",
+        "sourceExcerpt",
+        "analysis",
+        "matchedOrganizationIds",
+        "matchedDistrictIds",
+        "matchedProjectIds",
+        "status",
+        "resolvedAt",
+        "linkedWorkRecordAppId",
+        "metadata",
+      ].sort(),
+    );
+  });
+
+  it("resolves matched*Ids using the same exact-match rule as the Work Record mapping", () => {
+    const district = REFERENCE_DATA.organizations.find((org) => org.type === "district")!;
+    const project = REFERENCE_DATA.projects[0];
+    const record = buildInboxIntelligenceRecord(
+      analysis({ districts: [district.name, "Unknown District"], projects: [project.name] }),
+      "",
+      REFERENCE_DATA,
+      "2026-08-29T12:00:00.000Z",
+    );
+    expect(record.matchedDistrictIds).toEqual([district.appId]);
+    expect(record.matchedProjectIds).toEqual([project.appId]);
+  });
+});
+
+describe("computeInboxIntelligenceSummary", () => {
+  it("counts records by status", () => {
+    const record = buildInboxIntelligenceRecord(analysis(), "", REFERENCE_DATA, "2026-08-29T12:00:00.000Z");
+    const summary = computeInboxIntelligenceSummary([
+      { ...record, status: "open" },
+      { ...record, status: "open" },
+      { ...record, status: "waiting" },
+      { ...record, status: "resolved" },
+    ]);
+    expect(summary).toEqual({ openCount: 2, waitingCount: 1, resolvedCount: 1 });
+  });
+});
+
 describe("SessionInboxIntelligenceProvider", () => {
-  function record(overrides: Partial<InboxIntelligenceRecord> = {}): InboxIntelligenceRecord {
-    return {
-      appId: crypto.randomUUID(),
-      createdAt: new Date().toISOString(),
-      sourceExcerpt: "excerpt",
-      analysis: analysis(),
-      linkedWorkRecordAppId: null,
-      ...overrides,
-    };
+  function record() {
+    return buildInboxIntelligenceRecord(analysis(), "excerpt", REFERENCE_DATA, "2026-08-29T12:00:00.000Z");
   }
 
-  it("lists saved records newest first", () => {
+  it("assigns SharePoint-shaped provider metadata on create and lists newest first", async () => {
     const provider = new SessionInboxIntelligenceProvider();
-    provider.save(record({ createdAt: "2026-08-01T00:00:00Z" }));
-    provider.save(record({ createdAt: "2026-08-02T00:00:00Z" }));
-    const list = provider.list();
-    expect(list).toHaveLength(2);
-    expect(list[0].createdAt).toBe("2026-08-02T00:00:00Z");
+    const first = await provider.create(record());
+    const second = await provider.create(record());
+    expect(first.status).toBe("success");
+    expect(second.status).toBe("success");
+    if (first.status !== "success" || second.status !== "success") return;
+    expect(first.value.metadata.version).toBe(1);
+
+    const list = await provider.list();
+    expect(list.status).toBe("success");
+    if (list.status !== "success") return;
+    expect(list.value).toHaveLength(2);
+    expect(list.value[0].appId).toBe(second.value.appId); // most-recently-created first
   });
 
-  it("computes needsAttention and open-action counts from saved records", () => {
+  it("rejects a duplicate AppId as a conflict without overwriting the existing record", async () => {
     const provider = new SessionInboxIntelligenceProvider();
-    provider.save(record({ analysis: analysis({ needsAttention: true, actionItems: [{ action: "a", dueDate: null, owner: "me" }] }) }));
-    provider.save(record({ analysis: analysis({ needsAttention: false, actionItems: [] }) }));
-    expect(provider.summary()).toEqual({ needsAttentionCount: 1, openActionCount: 1 });
+    const created = await provider.create(record());
+    if (created.status !== "success") throw new Error("setup failed");
+    const duplicate = await provider.create({ ...record(), appId: created.value.appId });
+    expect(duplicate.status).toBe("conflict");
   });
 
-  it("keeps every instance independent — nothing is shared or durable across instances", () => {
+  it("increments RecordVersion on update and rejects a stale expectedVersion as a conflict", async () => {
+    const provider = new SessionInboxIntelligenceProvider();
+    const created = await provider.create(record());
+    if (created.status !== "success") throw new Error("setup failed");
+
+    const updated = await provider.update({ ...created.value, status: "waiting" }, 1);
+    expect(updated.status).toBe("success");
+    if (updated.status === "success") expect(updated.value.metadata.version).toBe(2);
+
+    const stale = await provider.update({ ...created.value, status: "resolved" }, 1);
+    expect(stale.status).toBe("conflict");
+  });
+
+  it("keeps every instance independent — nothing is shared or durable across instances", async () => {
     const first = new SessionInboxIntelligenceProvider();
-    first.save(record());
+    await first.create(record());
     const second = new SessionInboxIntelligenceProvider();
-    expect(second.list()).toEqual([]);
+    const list = await second.list();
+    expect(list).toEqual({ status: "success", value: [] });
   });
 });

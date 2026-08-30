@@ -444,6 +444,57 @@ The operator-facing version is [SHAREPOINT_PROVISIONING_CHECKLIST.md](./SHAREPOI
 - Disposable test items are removed and all seven production lists are empty before authorized seeding/migration.
 - No application provider setting, authentication configuration, or production persistence has changed.
 
+## 23. `IU_Inbox_Intelligence` (approved schema — Inbox Intelligence V1.1)
+
+**Status:** Provisioned manually and live-verified on the DEV site. Graph verification confirmed the canonical built-in internal field `Title`, all 24 approved custom columns and settings below, unique/indexed `AppId`, and no application Lookup fields. List ID: `892dbe47-6fa2-42f0-b9c4-1ed7a3664737`. This additive section does not change the seven-list baseline in sections 1–22 above.
+
+**Purpose:** Durable storage for reviewed/confirmed Inbox Intelligence records (`docs/INBOX_INTELLIGENCE_V1_REPORT.md`, `docs/INBOX_INTELLIGENCE_SHAREPOINT_REPORT.md`) — the AI-extracted intelligence a user has reviewed and saved, never the source email. Template `genericList`, same conventions as every list above (no Lookup/Person/Calculated/Managed Metadata/attachment/multi-choice columns; multiline text is plain, rich text and append-changes off; Number fields use zero decimal places; Choice fields are closed with fill-in disabled).
+
+| Internal name | Display name | SharePoint / Graph type | Required | Default | App maximum | Index | Unique |
+| --- | --- | --- | --- | --- | ---: | --- | --- |
+| `Title` | Suggested work title | Single line text / `text` | Yes | No default | 255 | No | No |
+| `AppId` | Application ID | Single line text / `text` | Yes | No default | 255 | Yes | Yes |
+| `SchemaVersion` | Schema version | Number / `number`, 0 decimals | Yes | `1` | — | No | No |
+| `SourceType` | Source type | Single line text / `text` | Yes | `pasted-email` | 255 | No | No |
+| `AnalyzedAt` | Analyzed at | Date and Time / `dateTime`, Date and Time (full, not date-only) | Yes | No default | — | No | No |
+| `SourceExcerpt` | Source excerpt | Multiple lines plain text / `text` | No | No default; runtime `""` | 500 | No | No |
+| `SummaryText` | Summary | Multiple lines plain text / `text` | Yes | No default | 2,000 | No | No |
+| `Priority` | Priority | Choice / `choice` | Yes | `medium` | — | No | No |
+| `NeedsAttention` | Needs attention | Yes/No / `boolean` | Yes | `false` | — | No | No |
+| `ActionItemsJson` | Action items (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `FollowUpText` | Follow-up | Multiple lines plain text / `text` | No | No default; runtime `""` | 1,000 | No | No |
+| `PeopleJson` | People (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `OrganizationsJson` | Organizations (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `DistrictsJson` | Districts (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `ProjectsJson` | Projects (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `TagsJson` | Tags (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `MatchedOrganizationIdsJson` | Matched organization IDs (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `MatchedDistrictIdsJson` | Matched district IDs (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `MatchedProjectIdsJson` | Matched project IDs (JSON) | Multiple lines plain text / `text` | Yes | `[]` | 10,000 | No | No |
+| `SuggestedWorkType` | Suggested work type | Single line text / `text` | No | No default; runtime `null` | 255 | No | No |
+| `SuggestedWorkRecordDescription` | Suggested work description | Multiple lines plain text / `text` | Yes | No default | 2,000 | No | No |
+| `LinkedWorkRecordAppId` | Linked Work Record | Single line text / `text` | No | No default; runtime `null` | 255 | No | No |
+| `Status` | Status | Choice / `choice` | Yes | `open` | — | No | No |
+| `ResolvedAt` | Resolved at | Date and Time / `dateTime` | No | No default; runtime `null` | — | No | No |
+| `RecordVersion` | Record version | Number / `number`, 0 decimals | Yes | `1` | — | No | No |
+
+Choice definitions:
+
+| Column | Ordered choices | Fill-in |
+| --- | --- | --- |
+| `Status` | `open`, `waiting`, `resolved` | Off |
+| `Priority` | `high`, `medium`, `low` | Off |
+
+Rules matching the established conventions:
+
+- `LinkedWorkRecordAppId` is ordinary text and must resolve to `IU_Work_Records.AppId` when non-null — not a SharePoint Lookup, same rule as `IU_Contacts.OrganizationAppId`.
+- `MatchedOrganizationIdsJson`/`MatchedDistrictIdsJson` values must exist in `IU_Organizations.AppId` when present; `MatchedProjectIdsJson` values must exist in `IU_Projects.AppId` when present. Unlike `IU_Work_Records`'s relationship arrays, these are best-effort matches computed from AI-extracted free text (`OrganizationsJson`/`DistrictsJson`/`ProjectsJson`), so an empty match array is expected and valid, not an error.
+- `ResolvedAt` is required to be non-null exactly when `Status = resolved`, and required to be null otherwise — application validation, not a SharePoint formula.
+- No raw email, email thread, signature, or Anthropic request/response payload is or may become a column on this list.
+- Content approval/moderation off; attachments off; folders not used; permissions inherit from the dedicated site; retention follows existing IU Microsoft 365 policy — identical to section 1's rules for the other seven lists.
+
+Indexes: `AppId` unique+indexed, matching every other list's stable-identity column. No other index is required at current expected volume.
+
 ## Microsoft references
 
 - [Create a SharePoint list with Microsoft Graph](https://learn.microsoft.com/en-us/graph/api/list-create?view=graph-rest-1.0)
