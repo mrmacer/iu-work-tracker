@@ -66,6 +66,27 @@ No synthetic smoke-test Work Record should remain.
 
 ---
 
+## Hosted Deployment — GREEN
+
+The verified GREEN build at commit `7e22e5909d1218c88a3be4deec45d3c61418da0f` is deployed to the existing owner-only Sites environment:
+
+https://iu-work-tracker.gmacer.chatgpt.site/
+
+Full detail: `docs/HOSTED_DEPLOYMENT_REPORT.md`.
+
+- Sites version 3 deployed successfully from a clean checkout of the exact commit; the two known local-only untracked exclusions and `.env.local` were not included.
+- The hosted Sites environment securely supplies the required public Microsoft/SharePoint identifiers and a server-only `ANTHROPIC_API_KEY` secret. The key is absent from client assets, rendered output, logs, and source.
+- Hosted delegated Microsoft sign-in succeeded for Macer, Gregory with the existing redirect URI and only `User.Read` plus `Sites.ReadWrite.All`.
+- The correct `IUWorkTrackerDEV` site resolved, all 10 existing lists were readable, and the footer reported `SharePoint DEV connected` with no prototype-provider fallback.
+- One normal-UI Work Record smoke test persisted to `IU_Work_Records` with AppId, RecordVersion 1, ETag, Created, and Modified; it survived reload.
+- One normal-UI Inbox Intelligence smoke test made exactly one successful hosted Anthropic request, rendered structured review output, persisted to `IU_Inbox_Intelligence`, survived reload, and passed `open→waiting→resolved→open` concurrency/version/timestamp checks.
+- Only the approved compact source excerpt and structured fields were stored. No raw email/body/thread, Anthropic payload, or credential was persisted.
+- Both exact synthetic items were permanently removed; exact lookups returned item-not-found/HTTP 404 and both active lists returned to their pre-test empty state.
+
+This is a hosted DEV milestone, not production SharePoint authorization or migration approval.
+
+---
+
 ## CRITICAL CURRENT PERSISTENCE STATE
 
 `DelegatedSharePointDataProvider` IS NOW IMPLEMENTED AND LIVE-VERIFIED IN DEV.
@@ -288,7 +309,7 @@ Do not commit broken or unknown state merely to make the working tree clean.
 
 ## Last Verified Milestone
 
-`DelegatedSharePointDataProvider` implemented, unit-tested (64/64 tests, build, typecheck, lint clean on all files touched), and live-verified end-to-end through the normal Log Work UI against DEV SharePoint: create, update (including ORBIT presence), Graph-side confirmation of every field/timestamp/version rule, delete, and confirmed HTTP 404 afterward. No synthetic data left behind. See docs/SHAREPOINT_PROVIDER_INTEGRATION_REPORT.md.
+Hosted deployment GREEN at `https://iu-work-tracker.gmacer.chatgpt.site/` for commit `7e22e5909d1218c88a3be4deec45d3c61418da0f`: Microsoft delegated sign-in, SharePoint Work Record persistence, Inbox Intelligence V1 analysis, and durable Inbox Intelligence V1.1 persistence were all live-verified through the hosted normal UI. Exactly one Anthropic request was made. Both synthetic records were permanently removed, exact lookups returned item-not-found/HTTP 404, and both lists are empty. See `docs/HOSTED_DEPLOYMENT_REPORT.md`.
 
 The prototype `ApiDataProvider` remains the default/fallback provider by design.
 
