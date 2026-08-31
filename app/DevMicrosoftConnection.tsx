@@ -2,10 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AccountInfo } from "@azure/msal-browser";
-// Type-only: never bundled at runtime, so this client component never pulls in
-// chatgpt-auth.ts's server-only next/headers usage. The sign-out URL itself is computed
-// server-side (app/page.tsx) and passed down as a plain string prop.
-import type { ChatGPTUser } from "./chatgpt-auth";
 import {
   createBrowserMicrosoftAuthController,
   InteractiveRedirectStartedError,
@@ -36,7 +32,7 @@ const publicConfig = readDevMicrosoftConfig();
 function safeErrorMessage(error: unknown): string {
   return error instanceof Error
     ? error.message
-    : "The DEV Microsoft connection check failed.";
+    : "The Microsoft connection check failed.";
 }
 
 function initials(name: string | undefined): string {
@@ -45,13 +41,14 @@ function initials(name: string | undefined): string {
   return `${parts[0][0]}${parts.at(-1)?.[0] ?? ""}`.toUpperCase();
 }
 
-export default function DevMicrosoftConnection({
-  chatGPTUser = null,
-  chatGPTSignOutHref = "/",
-}: {
-  chatGPTUser?: ChatGPTUser | null;
-  chatGPTSignOutHref?: string;
-} = {}) {
+/**
+ * The header's account control. This is a single account menu, always driven by the app's
+ * own Microsoft-authenticated identity (never a hosting platform's identity — see
+ * docs/AI_HANDOFF.md). When DEV Microsoft/SharePoint configuration is present it also shows
+ * the existing connection diagnostic rows; when it is absent there is simply no Microsoft
+ * account to show, and the menu says so rather than inventing an identity from elsewhere.
+ */
+export default function DevMicrosoftConnection() {
   const [open, setOpen] = useState(false);
   const controller = useRef<MicrosoftAuthController | null>(null);
   const [state, setState] = useState<ConnectionState>(() =>
@@ -120,52 +117,20 @@ export default function DevMicrosoftConnection({
     };
   }, [open]);
 
-  // No DEV Microsoft/SharePoint config in this environment — nothing to diagnose, so this
-  // is a plain account popover instead of the DEV connection panel below. It shows only
-  // identity already available from the existing ChatGPT Sites session (app/chatgpt-auth.ts)
-  // — no additional profile data is fetched for it.
-  if (publicConfig.status === "disabled") {
-    return (
-      <div className="dev-ms-connection" ref={container}>
-        <button
-          className="avatar"
-          aria-label="Account options"
-          aria-haspopup="true"
-          aria-expanded={open}
-          aria-controls="account-options-panel"
-          onClick={() => setOpen((value) => !value)}
-        >
-          {initials(chatGPTUser?.displayName)}
-        </button>
-        {open && (
-          <section
-            className="dev-ms-panel"
-            id="account-options-panel"
-            aria-label="Account options"
-          >
-            <p className="dev-ms-kicker">Account</p>
-            <div className="dev-ms-user">
-              <span>Signed in as</span>
-              <strong>{chatGPTUser?.displayName ?? "Not signed in"}</strong>
-              {chatGPTUser?.email && chatGPTUser.email !== chatGPTUser.displayName && (
-                <span>{chatGPTUser.email}</span>
-              )}
-            </div>
-            {chatGPTUser && (
-              <div className="dev-ms-actions">
-                <a href={chatGPTSignOutHref}>Sign out</a>
-              </div>
-            )}
-          </section>
-        )}
-      </div>
-    );
-  }
-
+  const configured = publicConfig.status !== "disabled";
   const account = "account" in state ? state.account : null;
   const microsoftConnected = account !== null;
   const sharePointConnected = state.status === "connected";
   const busy = state.status === "initializing" || state.status === "checking";
+
+  const primaryName =
+    state.status === "connected"
+      ? state.diagnostic.user.displayName
+      : (account?.name ?? account?.username ?? "Not signed in");
+  // MSAL's cached AccountInfo already carries the username (typically the UPN/email) —
+  // reused here as-is, never a new Graph request merely to populate this menu.
+  const secondaryIdentity =
+    account?.username && account.username !== primaryName ? account.username : null;
 
   const verifyConnection = async (
     auth: MicrosoftAuthController,
@@ -209,10 +174,10 @@ export default function DevMicrosoftConnection({
     <div className="dev-ms-connection" ref={container}>
       <button
         className={`avatar dev-ms-trigger ${sharePointConnected ? "connected" : ""}`}
-        aria-label="DEV Microsoft connection"
+        aria-label="Account options"
         aria-haspopup="true"
         aria-expanded={open}
-        aria-controls="dev-microsoft-connection-panel"
+        aria-controls="account-options-panel"
         onClick={() => setOpen((value) => !value)}
       >
         {initials(account?.name)}
@@ -220,23 +185,24 @@ export default function DevMicrosoftConnection({
       {open && (
         <section
           className="dev-ms-panel"
-          id="dev-microsoft-connection-panel"
-          aria-label="DEV Microsoft connection status"
+          id="account-options-panel"
+          aria-label="Account options"
         >
-          <p className="dev-ms-kicker">DEV connection</p>
-          <ConnectionRow label="Microsoft" connected={microsoftConnected} busy={busy} />
-          <ConnectionRow
-            label="SharePoint DEV"
-            connected={sharePointConnected}
-            busy={state.status === "checking"}
-          />
+          <p className="dev-ms-kicker">Account</p>
+          {configured && (
+            <>
+              <ConnectionRow label="Microsoft" connected={microsoftConnected} busy={busy} />
+              <ConnectionRow
+                label="SharePoint DEV"
+                connected={sharePointConnected}
+                busy={state.status === "checking"}
+              />
+            </>
+          )}
           <div className="dev-ms-user">
             <span>Signed in as</span>
-            <strong>
-              {state.status === "connected"
-                ? state.diagnostic.user.displayName
-                : account?.name ?? account?.username ?? "Not signed in"}
-            </strong>
+            <strong>{primaryName}</strong>
+            {secondaryIdentity && <span>{secondaryIdentity}</span>}
           </div>
           {state.status === "connected" && (
             <div className="dev-ms-detail">
@@ -250,36 +216,35 @@ export default function DevMicrosoftConnection({
               {state.message}
             </p>
           )}
-          <div className="dev-ms-actions">
-            {!account ? (
-              <button
-                onClick={() => void signIn()}
-                disabled={publicConfig.status !== "enabled" || busy}
-              >
-                Sign in with Microsoft
-              </button>
-            ) : (
-              <>
-                <button
-                  onClick={() =>
-                    publicConfig.status === "enabled" &&
-                    controller.current &&
-                    void verifyConnection(
-                      controller.current,
-                      account,
-                      publicConfig.value,
-                    )
-                  }
-                  disabled={busy}
-                >
-                  {busy ? "Checking…" : "Retry check"}
+          {configured && (
+            <div className="dev-ms-actions">
+              {!account ? (
+                <button onClick={() => void signIn()} disabled={busy}>
+                  Sign in with Microsoft
                 </button>
-                <button className="secondary" onClick={() => void signOut()}>
-                  Sign out
-                </button>
-              </>
-            )}
-          </div>
+              ) : (
+                <>
+                  <button
+                    onClick={() =>
+                      publicConfig.status === "enabled" &&
+                      controller.current &&
+                      void verifyConnection(
+                        controller.current,
+                        account,
+                        publicConfig.value,
+                      )
+                    }
+                    disabled={busy}
+                  >
+                    {busy ? "Checking…" : "Retry check"}
+                  </button>
+                  <button className="secondary" onClick={() => void signOut()}>
+                    Sign out
+                  </button>
+                </>
+              )}
+            </div>
+          )}
         </section>
       )}
     </div>

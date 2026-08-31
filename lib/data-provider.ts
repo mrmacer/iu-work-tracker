@@ -51,32 +51,6 @@ abstract class ReferenceProvider {
   async getSystemSettings() { return structuredClone(this.references.settings); }
 }
 
-function parseResult<T>(payload: unknown, response: Response): ProviderResult<T> {
-  if (payload && typeof payload === "object" && "status" in payload) return payload as ProviderResult<T>;
-  return response.ok
-    ? { status: "success", value: payload as T }
-    : { status: "persistence_error", message: "The data store returned an unexpected response." };
-}
-
-export class ApiDataProvider extends ReferenceProvider implements DataProvider {
-  private async request<T>(input: string, init?: RequestInit): Promise<ProviderResult<T>> {
-    try {
-      const response = await fetch(input, { cache: "no-store", ...init });
-      const payload = await response.json().catch(() => null);
-      return parseResult<T>(payload, response);
-    } catch {
-      return { status: "network_error", message: "The connected data store could not be reached." };
-    }
-  }
-  getWorkRecords() { return this.request<WorkRecord[]>("/api/records"); }
-  createWorkRecord(record: WorkRecord) {
-    return this.request<WorkRecord>("/api/records", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(record) });
-  }
-  updateWorkRecord(record: WorkRecord, expectedVersion: number) {
-    return this.request<WorkRecord>("/api/records", { method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify({ record, expectedVersion }) });
-  }
-}
-
 export class MemoryDataProvider extends ReferenceProvider implements DataProvider {
   private records: WorkRecord[];
   private sequence = 0;
@@ -223,34 +197,38 @@ export class DelegatedSharePointDataProvider extends ReferenceProvider implement
   }
 }
 
-export type ActiveProviderKind = "sharepoint" | "api";
+export type ActiveProviderKind = "sharepoint" | "memory";
 
 /**
- * DEV SharePoint provider selection. The prototype ApiDataProvider (and its existing
- * PrototypeFallbackProvider safety net in app/IUWorkTracker.tsx) remains the default and the
- * safe fallback. The SharePoint provider activates only when DEV Microsoft/SharePoint
- * configuration is present AND a Microsoft account is already signed in — this never
- * triggers an interactive sign-in prompt on its own.
+ * SharePoint is the only durable production data store (docs/PRODUCT_VISION.md "Treat
+ * SharePoint as the intended institutional source of truth"). The SharePoint provider
+ * activates only when DEV Microsoft/SharePoint configuration is present AND a Microsoft
+ * account is already signed in — this never triggers an interactive sign-in prompt on its
+ * own. Every other case (no config, config present but not yet signed in, or an
+ * initialization failure) deliberately returns the in-memory, session-only
+ * MemoryDataProvider rather than any durable database — there is no silent durable
+ * fallback. A visitor who wants durable persistence must sign in with Microsoft using the
+ * account control in the header, which this function never bypasses.
  */
 export async function selectDataProvider(): Promise<{ provider: DataProvider; kind: ActiveProviderKind }> {
-  if (typeof window === "undefined") return { provider: new ApiDataProvider(), kind: "api" };
+  if (typeof window === "undefined") return { provider: new MemoryDataProvider(), kind: "memory" };
 
   const config = readDevMicrosoftConfig();
   const siteId = process.env.NEXT_PUBLIC_SHAREPOINT_SITE_ID?.trim();
   const workRecordsListId = process.env.NEXT_PUBLIC_SHAREPOINT_IU_WORK_RECORDS_LIST_ID?.trim();
   if (config.status !== "enabled" || !siteId || !workRecordsListId) {
-    return { provider: new ApiDataProvider(), kind: "api" };
+    return { provider: new MemoryDataProvider(), kind: "memory" };
   }
 
   try {
     const controller = createBrowserMicrosoftAuthController(config.value, window.location.origin);
     const account = await controller.initialize();
-    if (!account) return { provider: new ApiDataProvider(), kind: "api" };
+    if (!account) return { provider: new MemoryDataProvider(), kind: "memory" };
     return {
       provider: new DelegatedSharePointDataProvider(controller, account, { siteId, workRecordsListId }),
       kind: "sharepoint",
     };
   } catch {
-    return { provider: new ApiDataProvider(), kind: "api" };
+    return { provider: new MemoryDataProvider(), kind: "memory" };
   }
 }

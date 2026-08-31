@@ -23,7 +23,6 @@ import {
 } from "../lib/inbox-action-center";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
-import type { ChatGPTUser } from "./chatgpt-auth";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
 
@@ -100,21 +99,12 @@ function emptyRecord(): WorkRecord {
 export default function IUWorkTracker({
   dataProvider,
   inboxDataProvider,
-  chatGPTUser = null,
-  chatGPTSignOutHref = "/",
-}: {
-  dataProvider?: DataProvider;
-  inboxDataProvider?: InboxIntelligenceProvider;
-  chatGPTUser?: ChatGPTUser | null;
-  chatGPTSignOutHref?: string;
-} = {}) {
+}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider } = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [storageMode, setStorageMode] = useState<ActiveProviderKind | "fallback">(
-    "api",
-  );
+  const [storageMode, setStorageMode] = useState<ActiveProviderKind>("memory");
   const [logging, setLogging] = useState(false);
   const [draft, setDraft] = useState<WorkRecord>(emptyRecord);
   const [step, setStep] = useState(1);
@@ -182,7 +172,7 @@ export default function IUWorkTracker({
           setReferences({ projects, organizations, contacts, categories, deliverables, reportingConfig, settings });
         }
       };
-      let kind: ActiveProviderKind | "fallback" = "api";
+      let kind: ActiveProviderKind = "memory";
       try {
         if (!provider.current) {
           const selected = await selectDataProvider();
@@ -193,10 +183,12 @@ export default function IUWorkTracker({
       } catch {
         // Selecting or loading from the active provider failed (including a SharePoint
         // initialization failure). Fall back to the safe in-memory prototype without
-        // touching whatever the failed provider holds.
+        // touching whatever the failed provider holds. This is the same non-durable
+        // "memory" kind selectDataProvider() itself returns when there is no signed-in
+        // Microsoft session — there is no separate durable fallback to distinguish it from.
         const fallback = new PrototypeFallbackProvider();
         provider.current = fallback;
-        kind = "fallback";
+        kind = "memory";
         await loadFrom(fallback);
       } finally {
         if (live) {
@@ -304,20 +296,14 @@ export default function IUWorkTracker({
   return (
     <>
     <main className="os-shell" inert={logging ? true : undefined} aria-hidden={logging || undefined}>
-      <Header
-        view={view}
-        setView={setView}
-        onLog={() => openLog()}
-        chatGPTUser={chatGPTUser}
-        chatGPTSignOutHref={chatGPTSignOutHref}
-      />
+      <Header view={view} setView={setView} onLog={() => openLog()} />
       <div className="os-body">
         <SideNav view={view} setView={setView} onLog={() => openLog()} />
         <section className="screen" aria-live="polite">
-          {storageMode === "fallback" && (
+          {storageMode === "memory" && (
             <div className="storage-banner">
-              <span>Prototype mode</span> Changes work in this preview session;
-              the connected data store will be used when available.
+              <span>Preview mode</span> Changes in this session are not saved. Sign in
+              with Microsoft (top right) to connect SharePoint and save durably.
             </div>
           )}
           {loading || !references ? (
@@ -372,11 +358,7 @@ export default function IUWorkTracker({
       <footer className="os-status">
         <span>
           <i />{" "}
-          {storageMode === "sharepoint"
-            ? "SharePoint DEV connected"
-            : storageMode === "api"
-              ? "Prototype data store connected"
-              : "Preview session active"}
+          {storageMode === "sharepoint" ? "SharePoint DEV connected" : "Preview session active"}
         </span>
         <span>Log it once. Use it everywhere.</span>
       </footer>
@@ -404,14 +386,10 @@ function Header({
   view,
   setView,
   onLog,
-  chatGPTUser,
-  chatGPTSignOutHref,
 }: {
   view: View;
   setView: (view: View) => void;
   onLog: () => void;
-  chatGPTUser: ChatGPTUser | null;
-  chatGPTSignOutHref: string;
 }) {
   return (
     <header className="os-header">
@@ -434,7 +412,7 @@ function Header({
         <button className="header-log" onClick={onLog}>
           + Log work
         </button>
-        <DevMicrosoftConnection chatGPTUser={chatGPTUser} chatGPTSignOutHref={chatGPTSignOutHref} />
+        <DevMicrosoftConnection />
       </div>
     </header>
   );

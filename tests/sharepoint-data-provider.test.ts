@@ -149,8 +149,8 @@ describe("DelegatedSharePointDataProvider", () => {
 });
 
 describe("selectDataProvider", () => {
-  it("falls back to the prototype ApiDataProvider outside a browser context", async () => {
+  it("falls back to the non-durable in-memory provider outside a browser context", async () => {
     const { kind } = await selectDataProvider();
-    expect(kind).toBe("api");
+    expect(kind).toBe("memory");
   });
 });

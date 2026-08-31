@@ -1,14 +1,13 @@
-import { env } from "cloudflare:workers";
 import Anthropic from "@anthropic-ai/sdk";
 import { analyzeEmailWithClaude, type AnalyzeEmailResult } from "../../../lib/anthropic-email-analysis";
 
 export const dynamic = "force-dynamic";
 
-// The Anthropic API key is a server-only secret read from the Workers environment
-// binding (matching the app/api/records/route.ts convention for env.DB). It is never
-// read from a NEXT_PUBLIC_* variable and never included in any response body or log line.
+// The Anthropic API key is a server-only secret read from process.env (standard Next.js
+// server-side env access). It is never read from a NEXT_PUBLIC_* variable, never sent to
+// the browser, and never included in any response body or log line.
 function buildClient(): Pick<Anthropic, "messages"> | null {
-  const apiKey = env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) return null;
   return new Anthropic({ apiKey });
 }
