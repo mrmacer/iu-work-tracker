@@ -2,6 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { AccountInfo } from "@azure/msal-browser";
+// Type-only: never bundled at runtime, so this client component never pulls in
+// chatgpt-auth.ts's server-only next/headers usage. The sign-out URL itself is computed
+// server-side (app/page.tsx) and passed down as a plain string prop.
+import type { ChatGPTUser } from "./chatgpt-auth";
 import {
   createBrowserMicrosoftAuthController,
   InteractiveRedirectStartedError,
@@ -41,7 +45,13 @@ function initials(name: string | undefined): string {
   return `${parts[0][0]}${parts.at(-1)?.[0] ?? ""}`.toUpperCase();
 }
 
-export default function DevMicrosoftConnection() {
+export default function DevMicrosoftConnection({
+  chatGPTUser = null,
+  chatGPTSignOutHref = "/",
+}: {
+  chatGPTUser?: ChatGPTUser | null;
+  chatGPTSignOutHref?: string;
+} = {}) {
   const [open, setOpen] = useState(false);
   const controller = useRef<MicrosoftAuthController | null>(null);
   const [state, setState] = useState<ConnectionState>(() =>
@@ -110,11 +120,45 @@ export default function DevMicrosoftConnection() {
     };
   }, [open]);
 
+  // No DEV Microsoft/SharePoint config in this environment — nothing to diagnose, so this
+  // is a plain account popover instead of the DEV connection panel below. It shows only
+  // identity already available from the existing ChatGPT Sites session (app/chatgpt-auth.ts)
+  // — no additional profile data is fetched for it.
   if (publicConfig.status === "disabled") {
     return (
-      <button className="avatar" aria-label="Account options">
-        GM
-      </button>
+      <div className="dev-ms-connection" ref={container}>
+        <button
+          className="avatar"
+          aria-label="Account options"
+          aria-haspopup="true"
+          aria-expanded={open}
+          aria-controls="account-options-panel"
+          onClick={() => setOpen((value) => !value)}
+        >
+          {initials(chatGPTUser?.displayName)}
+        </button>
+        {open && (
+          <section
+            className="dev-ms-panel"
+            id="account-options-panel"
+            aria-label="Account options"
+          >
+            <p className="dev-ms-kicker">Account</p>
+            <div className="dev-ms-user">
+              <span>Signed in as</span>
+              <strong>{chatGPTUser?.displayName ?? "Not signed in"}</strong>
+              {chatGPTUser?.email && chatGPTUser.email !== chatGPTUser.displayName && (
+                <span>{chatGPTUser.email}</span>
+              )}
+            </div>
+            {chatGPTUser && (
+              <div className="dev-ms-actions">
+                <a href={chatGPTSignOutHref}>Sign out</a>
+              </div>
+            )}
+          </section>
+        )}
+      </div>
     );
   }
 
@@ -166,6 +210,7 @@ export default function DevMicrosoftConnection() {
       <button
         className={`avatar dev-ms-trigger ${sharePointConnected ? "connected" : ""}`}
         aria-label="DEV Microsoft connection"
+        aria-haspopup="true"
         aria-expanded={open}
         aria-controls="dev-microsoft-connection-panel"
         onClick={() => setOpen((value) => !value)}

@@ -23,6 +23,7 @@ import {
 } from "../lib/inbox-action-center";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
+import type { ChatGPTUser } from "./chatgpt-auth";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
 
@@ -99,7 +100,14 @@ function emptyRecord(): WorkRecord {
 export default function IUWorkTracker({
   dataProvider,
   inboxDataProvider,
-}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider } = {}) {
+  chatGPTUser = null,
+  chatGPTSignOutHref = "/",
+}: {
+  dataProvider?: DataProvider;
+  inboxDataProvider?: InboxIntelligenceProvider;
+  chatGPTUser?: ChatGPTUser | null;
+  chatGPTSignOutHref?: string;
+} = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
@@ -296,7 +304,13 @@ export default function IUWorkTracker({
   return (
     <>
     <main className="os-shell" inert={logging ? true : undefined} aria-hidden={logging || undefined}>
-      <Header view={view} setView={setView} onLog={() => openLog()} />
+      <Header
+        view={view}
+        setView={setView}
+        onLog={() => openLog()}
+        chatGPTUser={chatGPTUser}
+        chatGPTSignOutHref={chatGPTSignOutHref}
+      />
       <div className="os-body">
         <SideNav view={view} setView={setView} onLog={() => openLog()} />
         <section className="screen" aria-live="polite">
@@ -390,10 +404,14 @@ function Header({
   view,
   setView,
   onLog,
+  chatGPTUser,
+  chatGPTSignOutHref,
 }: {
   view: View;
   setView: (view: View) => void;
   onLog: () => void;
+  chatGPTUser: ChatGPTUser | null;
+  chatGPTSignOutHref: string;
 }) {
   return (
     <header className="os-header">
@@ -416,7 +434,7 @@ function Header({
         <button className="header-log" onClick={onLog}>
           + Log work
         </button>
-        <DevMicrosoftConnection />
+        <DevMicrosoftConnection chatGPTUser={chatGPTUser} chatGPTSignOutHref={chatGPTSignOutHref} />
       </div>
     </header>
   );
