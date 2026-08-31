@@ -162,6 +162,20 @@ Do not reprovision or alter this list schema, broaden Entra permissions, or begi
 
 ---
 
+## Dashboard Action Center (Patch 1) — implemented
+
+Home now includes a compact "Action Center" panel, entirely a read view over already-durable Inbox Intelligence records loaded through the existing `InboxIntelligenceProvider` — no new persistence path, no new list, no AI call.
+
+- Needs attention: records where the stored `analysis.needsAttention` flag is true and `status !== "resolved"` — never inferred from `status` alone.
+- Waiting on: records with `status === "waiting"`.
+- Open/Waiting/Resolved counts, deterministic due-date labels (`Due tomorrow`, weekday name, `Overdue`) only when an action item already has a real stored `dueDate`, and a small deterministic display limit (3 items/section) with a link into the full Inbox Intelligence screen.
+- Dashboard load makes zero Anthropic requests — guarded by an automated test.
+- Deliberately does not show "waiting N days": no dedicated status-transition timestamp exists yet to support that accurately, and a plain label beats false precision.
+
+Do not add a Voice Intelligence, People/Organization/CRM, or a second Inbox management surface on Home as a result of this patch — those remain out of scope.
+
+---
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:

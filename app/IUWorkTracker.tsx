@@ -13,6 +13,14 @@ import {
   type InboxIntelligenceProvider,
   type InboxIntelligenceResult,
 } from "../lib/inbox-intelligence-provider";
+import {
+  filterNeedsAttention,
+  formatDueLabel,
+  earliestDueDate,
+  primaryLabel,
+  selectNeedsAttention,
+  selectWaiting,
+} from "../lib/inbox-action-center";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
@@ -88,7 +96,10 @@ function emptyRecord(): WorkRecord {
   };
 }
 
-export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataProvider } = {}) {
+export default function IUWorkTracker({
+  dataProvider,
+  inboxDataProvider,
+}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider } = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
@@ -106,18 +117,23 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
   const opener = useRef<HTMLElement | null>(null);
   const provider = useRef<DataProvider | null>(dataProvider ?? null);
   const onSavedRef = useRef<((saved: WorkRecord) => void) | null>(null);
-  const inboxProvider = useRef<InboxIntelligenceProvider | null>(null);
+  const inboxProvider = useRef<InboxIntelligenceProvider | null>(inboxDataProvider ?? null);
   const [inboxRecords, setInboxRecords] = useState<InboxIntelligenceRecord[]>([]);
+  const [inboxLoadFailed, setInboxLoadFailed] = useState(false);
   useEffect(() => {
     // Independent of the Work Record load above: a failure here never affects Work Records,
     // and vice versa. This is a read-only list() call — zero Anthropic calls, matching
     // docs/INBOX_INTELLIGENCE_SHAREPOINT_REPORT.md "AI cost control".
     let live = true;
     (async () => {
-      const selected = await selectInboxIntelligenceProvider();
-      inboxProvider.current = selected.provider;
-      const result = await selected.provider.list();
-      if (live && result.status === "success") setInboxRecords(result.value);
+      if (!inboxProvider.current) {
+        const selected = await selectInboxIntelligenceProvider();
+        inboxProvider.current = selected.provider;
+      }
+      const result = await inboxProvider.current.list();
+      if (!live) return;
+      if (result.status === "success") setInboxRecords(result.value);
+      else setInboxLoadFailed(true);
     })();
     return () => {
       live = false;
@@ -301,7 +317,11 @@ export default function IUWorkTracker({ dataProvider }: { dataProvider?: DataPro
               openLog={openLog}
               setView={setView}
               references={references}
-              inboxOpenCount={computeInboxIntelligenceSummary(inboxRecords).openCount}
+              inboxSummary={computeInboxIntelligenceSummary(inboxRecords)}
+              needsAttentionCount={filterNeedsAttention(inboxRecords).length}
+              needsAttentionItems={selectNeedsAttention(inboxRecords)}
+              waitingItems={selectWaiting(inboxRecords)}
+              inboxLoadFailed={inboxLoadFailed}
             />
           ) : view === "today" ? (
             <Today
@@ -444,7 +464,11 @@ function Home({
   openLog,
   setView,
   references,
-  inboxOpenCount,
+  inboxSummary,
+  needsAttentionCount,
+  needsAttentionItems,
+  waitingItems,
+  inboxLoadFailed,
 }: {
   records: WorkRecord[];
   todayRecords: WorkRecord[];
@@ -453,7 +477,11 @@ function Home({
   openLog: (r?: WorkRecord) => void;
   setView: (v: View) => void;
   references: ReferenceData;
-  inboxOpenCount: number;
+  inboxSummary: { openCount: number; waitingCount: number; resolvedCount: number };
+  needsAttentionCount: number;
+  needsAttentionItems: InboxIntelligenceRecord[];
+  waitingItems: InboxIntelligenceRecord[];
+  inboxLoadFailed: boolean;
 }) {
   const latest = todayRecords.slice(0, 3);
   return (
@@ -546,6 +574,14 @@ function Home({
           </button>
         </aside>
       </div>
+      <ActionCenter
+        summary={inboxSummary}
+        needsAttentionCount={needsAttentionCount}
+        needsAttentionItems={needsAttentionItems}
+        waitingItems={waitingItems}
+        loadFailed={inboxLoadFailed}
+        setView={setView}
+      />
       <div className="command-grid">
         <Command
           accent
@@ -575,7 +611,7 @@ function Home({
         <Command
           icon="✉"
           title="Inbox Intelligence"
-          copy={inboxOpenCount > 0 ? `${inboxOpenCount} need attention` : "Turn a pasted email into a work record"}
+          copy={needsAttentionCount > 0 ? `${needsAttentionCount} need attention` : "Turn a pasted email into a work record"}
           onClick={() => setView("inbox")}
         />
       </div>
@@ -1565,6 +1601,119 @@ function RecordRow({
         </small>
       </span>
       <b>{hours(record.durationMinutes)}</b>
+      <i>→</i>
+    </button>
+  );
+}
+/**
+ * The Home attention surface for already-durable Inbox Intelligence — a compact view, not a
+ * second management screen. Every row/count here is derived from records the parent already
+ * loaded through the existing provider; this component makes zero network/AI calls itself.
+ */
+function ActionCenter({
+  summary,
+  needsAttentionCount,
+  needsAttentionItems,
+  waitingItems,
+  loadFailed,
+  setView,
+}: {
+  summary: { openCount: number; waitingCount: number; resolvedCount: number };
+  needsAttentionCount: number;
+  needsAttentionItems: InboxIntelligenceRecord[];
+  waitingItems: InboxIntelligenceRecord[];
+  loadFailed: boolean;
+  setView: (v: View) => void;
+}) {
+  const openInbox = () => setView("inbox");
+  const isEmpty = summary.openCount + summary.waitingCount + summary.resolvedCount === 0;
+
+  return (
+    <section className="panel list-panel action-center">
+      <div className="panel-heading">
+        <div>
+          <p className="eyebrow">What deserves your attention</p>
+          <h2>Action Center</h2>
+        </div>
+        {!isEmpty && !loadFailed && (
+          <button className="text-action" onClick={openInbox}>
+            View Intelligence →
+          </button>
+        )}
+      </div>
+      {loadFailed ? (
+        <Empty
+          title="Inbox Intelligence is temporarily unavailable"
+          copy="Your Work Record data above is unaffected. Try Inbox Intelligence directly."
+          action="Open Inbox Intelligence"
+          onAction={openInbox}
+        />
+      ) : isEmpty ? (
+        <Empty
+          title="Nothing needs your attention"
+          copy="Analyze an email in Inbox Intelligence to begin building your work intelligence."
+          action="Open Inbox Intelligence"
+          onAction={openInbox}
+        />
+      ) : (
+        <>
+          {needsAttentionItems.length > 0 && (
+            <div className="action-center-section">
+              <div className="panel-heading">
+                <h3>Needs attention</h3>
+                <span className="count-badge">{needsAttentionCount}</span>
+              </div>
+              {needsAttentionItems.map((record) => (
+                <ActionCenterRow key={record.appId} record={record} showDue onClick={openInbox} />
+              ))}
+            </div>
+          )}
+          {waitingItems.length > 0 && (
+            <div className="action-center-section">
+              <div className="panel-heading">
+                <h3>Waiting on</h3>
+                <span className="count-badge">{summary.waitingCount}</span>
+              </div>
+              {waitingItems.map((record) => (
+                <ActionCenterRow key={record.appId} record={record} showDue={false} onClick={openInbox} />
+              ))}
+            </div>
+          )}
+          {needsAttentionItems.length === 0 && waitingItems.length === 0 && (
+            <p className="muted-copy">Nothing needs attention or is waiting right now.</p>
+          )}
+          <div className="metric-strip">
+            <Metric value={String(summary.openCount)} label="open" />
+            <Metric value={String(summary.waitingCount)} label="waiting" />
+            <Metric value={String(summary.resolvedCount)} label="resolved" />
+          </div>
+        </>
+      )}
+    </section>
+  );
+}
+function ActionCenterRow({
+  record,
+  showDue,
+  onClick,
+}: {
+  record: InboxIntelligenceRecord;
+  showDue: boolean;
+  onClick: () => void;
+}) {
+  const dueLabel = showDue ? formatDueLabel(earliestDueDate(record)) : null;
+  return (
+    <button className="record-row" onClick={onClick}>
+      <span className={`record-dot ${showDue ? "iu" : "orbit"}`} />
+      <span>
+        <strong>{primaryLabel(record)}</strong>
+        {dueLabel?.overdue && (
+          <small>
+            <em>Overdue</em>
+          </small>
+        )}
+      </span>
+      <b>{dueLabel && !dueLabel.overdue ? dueLabel.text : ""}</b>
       <i>→</i>
     </button>
   );
