@@ -51,6 +51,11 @@ export function normalizeActionItemDueDate(dueDate: string | null): string | nul
   return dueDate && DATE_ONLY_PATTERN.test(dueDate) ? dueDate : null;
 }
 
+/** Order-preserving, exact-match dedup — repeated signatures/mentions must not multiply an entity. */
+function dedupeStrings(values: string[]): string[] {
+  return [...new Set(values)];
+}
+
 export function normalizeEmailAnalysis(analysis: EmailAnalysis): EmailAnalysis {
   return {
     ...analysis,
@@ -58,6 +63,11 @@ export function normalizeEmailAnalysis(analysis: EmailAnalysis): EmailAnalysis {
       ...item,
       dueDate: normalizeActionItemDueDate(item.dueDate),
     })),
+    people: dedupeStrings(analysis.people),
+    organizations: dedupeStrings(analysis.organizations),
+    districts: dedupeStrings(analysis.districts),
+    projects: dedupeStrings(analysis.projects),
+    tags: dedupeStrings(analysis.tags),
   };
 }
 

@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { zodOutputFormat } from "@anthropic-ai/sdk/helpers/zod";
 import { ANTHROPIC_EFFORT, ANTHROPIC_MAX_OUTPUT_TOKENS, ANTHROPIC_MODEL, MAX_EMAIL_LENGTH } from "./anthropic-config";
+import { stripDeterministicEmailNoise } from "./email-noise-filter";
 import { EmailAnalysisSchema, normalizeEmailAnalysis, type EmailAnalysis } from "./inbox-intelligence-models";
 
 export type AnalyzeEmailUsage = {
@@ -16,7 +17,7 @@ export type AnalyzeEmailResult =
   | { status: "network_error"; message: string }
   | { status: "server_error"; message: string };
 
-const SYSTEM_PROMPT = `You extract structured intelligence from one pasted work email for a school Intermediate Unit professional. The pasted text may include headers, quoted thread history, and a signature — read all of it, but summarize the current message.
+export const SYSTEM_PROMPT = `You extract structured intelligence from one pasted work email for a school Intermediate Unit professional. The pasted text may include headers, quoted thread history, and a signature — read all of it, but summarize the current message.
 
 Be strict about the difference between two things:
 1. WHAT THE EMAIL SAYS — facts, requests, and information actually present in the text.
@@ -29,7 +30,13 @@ Rules:
 - "priority" and "needsAttention" reflect this one email, not a general assessment of the sender.
 - "suggestedWorkType" is a short free-text guess at the kind of work activity this represents, or null if unclear. It is not validated against any controlled vocabulary — leave matching that up to the application.
 - "suggestedWorkRecord" is a minimal starting point for a work log entry a human will review and edit before saving — keep the title short and concrete, and the description one or two sentences.
-- Every array field must be present; use an empty array when nothing applies. Never omit a field or return null for an array.`;
+- Every array field must be present; use an empty array when nothing applies. Never omit a field or return null for an array.
+
+Thread and boilerplate handling:
+- Prioritize the newest authored message. Quoted or forwarded content (marked by lines like "-----Original Message-----", "From:"/"Sent:"/"To:"/"Subject:" headers, ">" quoting, or "On [date], [person] wrote:") is context for understanding the current message — never resurrect an old, already-addressed request from quoted history as a new current action unless the newest message reaffirms it.
+- Ignore signatures, confidentiality/legal disclaimers, meeting-join boilerplate (Teams, Zoom, or similar), and marketing/social-media footer links as sources of action items, entities, tags, or deadlines.
+- Do not list a technology, platform, or vendor name (for example Microsoft, Teams, Zoom, Facebook, LinkedIn, YouTube) as a person, organization, or project merely because it appears in boilerplate — only when the current authored content genuinely discusses it as work-relevant.
+- Never list the same person, organization, project, or tag more than once.`;
 
 /**
  * Calls Claude to extract structured intelligence from one pasted email and validates the
@@ -55,6 +62,10 @@ export async function analyzeEmailWithClaude(
     return { status: "server_error", message: "AI analysis is not configured." };
   }
 
+  // Deterministic, conservative stripping only — see lib/email-noise-filter.ts. The length
+  // check above runs against the original pasted text, matching what the user actually typed.
+  const cleaned = stripDeterministicEmailNoise(trimmed);
+
   let response;
   try {
     response = await client.messages.parse({
@@ -65,7 +76,7 @@ export async function analyzeEmailWithClaude(
         format: zodOutputFormat(EmailAnalysisSchema),
         effort: ANTHROPIC_EFFORT,
       },
-      messages: [{ role: "user", content: `Analyze this pasted email:\n\n${trimmed}` }],
+      messages: [{ role: "user", content: `Analyze this pasted email:\n\n${cleaned}` }],
     });
   } catch (error) {
     if (error instanceof Anthropic.RateLimitError) {

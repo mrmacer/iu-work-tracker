@@ -176,6 +176,21 @@ Do not add a Voice Intelligence, People/Organization/CRM, or a second Inbox mana
 
 ---
 
+## Email Noise Torture Test (Patch 2) — implemented
+
+A testing + extraction-hardening patch answering: can the Inbox Intelligence extraction pipeline distinguish real work signal from normal institutional email garbage (signatures, disclaimers, meeting-join boilerplate, quoted threads, forwarded headers, marketing footers)?
+
+- New `tests/fixtures/email-noise.ts`: composable synthetic fixtures for 15 noise categories (external-sender warning, signature block, confidentiality notice, Teams/Zoom join boilerplate, social links, unsubscribe footer, image placeholders, auto-reply, calendar block, forwarded header, legal/security footer, quoted-thread wrapper) plus a `buildEmail(...)` joiner.
+- New `tests/email-noise-filter.test.ts` (6 tests) and `tests/email-noise-torture.test.ts` (24 tests, covering the 20 required numbered cases plus combined scenarios) — all use the existing dependency-injected fake-client pattern from `tests/inbox-intelligence-analysis.test.ts`. **Zero real Anthropic API calls.**
+- Hardening made, smallest-change only, after auditing the original prompt/pipeline against all 15 categories:
+  1. New `lib/email-noise-filter.ts` (`stripDeterministicEmailNoise`) — conservative, whole-line-match-only preprocessing removing only the external-sender warning banner, standalone image-placeholder lines, and standalone unsubscribe/footer lines before the email reaches the model. Signatures, quoted threads, forwarded headers, and calendar/meeting blocks are deliberately left untouched (too judgment-dependent to strip safely). Wired into `analyzeEmailWithClaude` in `lib/anthropic-email-analysis.ts`; the `MAX_EMAIL_LENGTH` check still runs against the original pasted text.
+  2. `SYSTEM_PROMPT` (now exported for testability) gained one added "Thread and boilerplate handling" paragraph: prioritize the newest authored message over quoted/forwarded content (never resurrect an old, already-addressed quoted request as a new action unless the current message reaffirms it); ignore signatures/disclaimers/meeting-join boilerplate/marketing-social footers as sources of actions, entities, tags, or deadlines; don't list a technology/platform/vendor name (Microsoft, Teams, Zoom, Facebook, LinkedIn, YouTube) as an entity merely because it appears in boilerplate; never list the same entity more than once.
+  3. `normalizeEmailAnalysis` in `lib/inbox-intelligence-models.ts` now also deterministically dedupes `people`/`organizations`/`districts`/`projects`/`tags` (previously only `actionItems[].dueDate` was normalized) — a mechanical safety net independent of model compliance.
+- Persisted `InboxIntelligenceRecord` SharePoint schema, status lifecycle, and concurrency model are unchanged.
+- Known, intentionally deferred limitation: these tests validate the deterministic preprocessor and the surrounding pipeline (schema validation, normalization, entity matching, Work Record mapping) against hand-authored "desired correct" model responses — they cannot, without a real (forbidden) paid API call, prove the live model actually follows the hardened prompt. A hosted live smoke test remains a separate future authorization.
+
+---
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:
