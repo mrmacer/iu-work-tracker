@@ -12,6 +12,7 @@ import MeetingNotes from "../app/MeetingNotes";
 import IUWorkTracker from "../app/IUWorkTracker";
 import { MemoryDataProvider } from "../lib/data-provider";
 import { SessionInboxIntelligenceProvider } from "../lib/inbox-intelligence-provider";
+import { MemoryMeetingRecordProvider } from "../lib/meeting-record-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 import type { AnalyzeMeetingResult } from "../lib/anthropic-meeting-analysis";
 import { MEETING_CANDIDATE_TYPES, type MeetingCandidateType } from "../lib/meeting-intelligence-models";
@@ -34,6 +35,20 @@ function baseWorkRecord(): WorkRecord {
 
 function jsonResponse(value: unknown): Response {
   return new Response(JSON.stringify(value), { status: 200, headers: { "content-type": "application/json" } });
+}
+
+function renderMeeting(openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void) {
+  return render(
+    <MeetingNotes
+      openLog={openLog}
+      createDraftRecord={baseWorkRecord}
+      records={[]}
+      saveRecord={vi.fn()}
+      updateRecord={vi.fn()}
+      loadFailed={false}
+      storageMode="memory"
+    />,
+  );
 }
 
 function analysisWith(type: MeetingCandidateType): AnalyzeMeetingResult {
@@ -66,7 +81,7 @@ describe("Meeting Notes — Log as work eligibility", () => {
   it.each(MEETING_CANDIDATE_TYPES)("candidate type %s", async (type) => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith(type)));
-    render(<MeetingNotes openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    renderMeeting(vi.fn());
     await analyzeInto(user);
 
     const logAsWorkButton = screen.queryByRole("button", { name: "Log as work" });
@@ -80,7 +95,7 @@ describe("Meeting Notes — Log as work eligibility", () => {
   it("removes Log as work when the current candidate is changed away from COMPLETED_WORK", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("COMPLETED_WORK")));
-    render(<MeetingNotes openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    renderMeeting(vi.fn());
     await analyzeInto(user);
     expect(screen.getByRole("button", { name: "Log as work" })).toBeTruthy();
 
@@ -91,7 +106,7 @@ describe("Meeting Notes — Log as work eligibility", () => {
   it("adds Log as work when the current candidate is changed to COMPLETED_WORK", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("ACTION")));
-    render(<MeetingNotes openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    renderMeeting(vi.fn());
     await analyzeInto(user);
     expect(screen.queryByRole("button", { name: "Log as work" })).toBeFalsy();
 
@@ -102,7 +117,7 @@ describe("Meeting Notes — Log as work eligibility", () => {
   it("DECISION candidates never show Log as work", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("DECISION")));
-    render(<MeetingNotes openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    renderMeeting(vi.fn());
     await analyzeInto(user);
     expect(screen.queryByRole("button", { name: "Log as work" })).toBeFalsy();
   });
@@ -113,7 +128,7 @@ describe("Meeting Notes — Log as work uses current edited state, performs zero
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("COMPLETED_WORK")));
     const openLog = vi.fn();
-    render(<MeetingNotes openLog={openLog} createDraftRecord={baseWorkRecord} />);
+    renderMeeting(openLog);
     await analyzeInto(user);
     return { user, fetchSpy, openLog };
   }
@@ -206,5 +221,56 @@ describe("Meeting Notes — full integration through the existing Work Record fo
     const [savedRecord] = createSpy.mock.calls[0];
     expect(savedRecord.title).toBe("Reviewed the STEELS grant budget section");
     expect(savedRecord.activityType).toBe(firstRealOption);
+  });
+});
+
+describe("Meeting Notes / Work Record persistence stay uncoupled (Patch 6B regression)", () => {
+  it("Log as work → Save & done writes a Work Record and never touches the Meeting Record store", async () => {
+    const user = userEvent.setup();
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("COMPLETED_WORK")));
+    const dataProvider = new MemoryDataProvider([]);
+    const meetingDataProvider = new MemoryMeetingRecordProvider();
+    const workCreateSpy = vi.spyOn(dataProvider, "createWorkRecord");
+    const meetingCreateSpy = vi.spyOn(meetingDataProvider, "create");
+    const meetingUpdateSpy = vi.spyOn(meetingDataProvider, "update");
+    const inboxDataProvider = new SessionInboxIntelligenceProvider();
+
+    render(<IUWorkTracker dataProvider={dataProvider} inboxDataProvider={inboxDataProvider} meetingDataProvider={meetingDataProvider} />);
+
+    const nav = await screen.findByRole("navigation");
+    await user.click(within(nav).getByRole("button", { name: /meeting notes/i }));
+    await analyzeInto(user);
+    await user.click(screen.getByRole("button", { name: "Log as work" }));
+
+    const dialog = await screen.findByRole("dialog");
+    const activityTypeSelect = within(dialog).getByLabelText(/Activity type/i) as HTMLSelectElement;
+    await user.selectOptions(activityTypeSelect, activityTypeSelect.options[1].value);
+    for (let i = 0; i < 4; i++) {
+      await user.click(within(dialog).getByRole("button", { name: /continue/i }));
+    }
+    await user.click(within(dialog).getByRole("button", { name: "Save & done" }));
+
+    await waitFor(() => expect(workCreateSpy).toHaveBeenCalledTimes(1));
+    expect(meetingCreateSpy).not.toHaveBeenCalled();
+    expect(meetingUpdateSpy).not.toHaveBeenCalled();
+  });
+
+  it("Save Meeting writes a Meeting Record and never touches the Work Record store", async () => {
+    const user = userEvent.setup();
+    const dataProvider = new MemoryDataProvider([]);
+    const meetingDataProvider = new MemoryMeetingRecordProvider();
+    const workCreateSpy = vi.spyOn(dataProvider, "createWorkRecord");
+    const meetingCreateSpy = vi.spyOn(meetingDataProvider, "create");
+    const inboxDataProvider = new SessionInboxIntelligenceProvider();
+
+    render(<IUWorkTracker dataProvider={dataProvider} inboxDataProvider={inboxDataProvider} meetingDataProvider={meetingDataProvider} />);
+
+    const nav = await screen.findByRole("navigation");
+    await user.click(within(nav).getByRole("button", { name: /meeting notes/i }));
+    await user.type(screen.getByPlaceholderText(/steels quarterly planning/i), "Quick check-in");
+    await user.click(screen.getByRole("button", { name: "Save Meeting" }));
+
+    await waitFor(() => expect(meetingCreateSpy).toHaveBeenCalledTimes(1));
+    expect(workCreateSpy).not.toHaveBeenCalled();
   });
 });

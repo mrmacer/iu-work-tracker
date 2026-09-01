@@ -1,17 +1,22 @@
 "use client";
 
 import { useState } from "react";
+import type { ActiveProviderKind } from "../lib/data-provider";
 import type { AnalyzeMeetingResult, AnalyzeMeetingUsage } from "../lib/anthropic-meeting-analysis";
 import { MAX_MEETING_CONTENT_LENGTH } from "../lib/meeting-intelligence-config";
 import {
   MEETING_CANDIDATE_TYPES,
   MEETING_CANDIDATE_TYPE_LABELS,
+  MEETING_RECORD_SCHEMA_VERSION,
   type MeetingCandidate,
   type MeetingCandidateType,
+  type MeetingRecord,
+  type ReviewedMeetingCandidate,
 } from "../lib/meeting-intelligence-models";
 import { buildWorkRecordDraftFromMeetingCandidate } from "../lib/meeting-intelligence-work-record";
 import { buildDraftMinutes, type MeetingDraft } from "../lib/meeting-minutes";
-import type { WorkRecord } from "../lib/models";
+import type { MeetingRecordResult } from "../lib/meeting-record-provider";
+import type { ProviderMetadata, WorkRecord } from "../lib/models";
 
 const MEETING_TYPES = [
   "District Meeting",
@@ -31,40 +36,90 @@ function emptyMeetingDraft(): MeetingDraft {
   return { title: "", date: todayIso(), meetingType: "", attendeesText: "", agendaText: "", notesText: "" };
 }
 
+function emptyMetadata(): ProviderMetadata {
+  return { version: 0, createdAt: "", modifiedAt: "", syncState: "saved" };
+}
+
 /**
  * Local browser review state only — an AI candidate plus the two fields the review UI needs
  * that the model never produces: a stable React key and whether the user has it selected.
- * Nothing here — meeting details, agenda, notes, or candidates — is ever written to
- * SharePoint, Work Records, Inbox Intelligence, a Knowledge Base, or any browser storage. See
- * docs/AI_HANDOFF.md "Meeting Notes V1".
+ * See docs/AI_HANDOFF.md "Meeting Notes durability (Patch 6B)" — the client-only `id` is
+ * never part of the durable record; it is regenerated every time a saved meeting is reopened.
  */
-type ReviewMeetingCandidate = MeetingCandidate & { id: string; selected: boolean };
+type ReviewCandidate = MeetingCandidate & { id: string; selected: boolean };
 
-function toReviewCandidates(candidates: MeetingCandidate[]): ReviewMeetingCandidate[] {
+function toReviewCandidates(candidates: MeetingCandidate[]): ReviewCandidate[] {
   return candidates.map((candidate) => ({ ...candidate, id: crypto.randomUUID(), selected: true }));
+}
+
+/** Strips the transient UI id — this is the exact shape that becomes MeetingRecord.reviewedCandidates.
+ * Field-by-field (not an `id`-omitting spread) so nothing beyond the documented reviewed-candidate
+ * shape can leak in silently. */
+function stripReviewIds(candidates: ReviewCandidate[]): ReviewedMeetingCandidate[] {
+  return candidates.map(({ type, title, detail, sourceExcerpt, ownerText, dueText, durationText, selected }) => ({
+    type,
+    title,
+    detail,
+    sourceExcerpt,
+    ownerText,
+    dueText,
+    durationText,
+    selected,
+  }));
+}
+
+/** Dirty-state fingerprint: candidate content only, deliberately excluding the UI-only id so
+ * regenerating ids on reopen never falsely shows unsaved changes. */
+function snapshotOf(draft: MeetingDraft, candidates: ReviewCandidate[], analysisModel: string | null, analyzedAt: string | null): string {
+  return JSON.stringify({ draft, candidates: stripReviewIds(candidates), analysisModel, analyzedAt });
+}
+
+type Identity = { appId: string; metadata: ProviderMetadata };
+
+function freshIdentity(): Identity {
+  return { appId: crypto.randomUUID(), metadata: emptyMetadata() };
 }
 
 export default function MeetingNotes({
   openLog,
   createDraftRecord,
+  records,
+  saveRecord,
+  updateRecord,
+  loadFailed,
+  storageMode,
 }: {
   openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
   createDraftRecord: () => WorkRecord;
+  records: MeetingRecord[];
+  saveRecord: (record: MeetingRecord) => Promise<MeetingRecordResult<MeetingRecord>>;
+  updateRecord: (record: MeetingRecord, expectedVersion: number) => Promise<MeetingRecordResult<MeetingRecord>>;
+  loadFailed: boolean;
+  storageMode: ActiveProviderKind;
 }) {
   const [draft, setDraft] = useState<MeetingDraft>(emptyMeetingDraft);
+  const [identity, setIdentity] = useState<Identity>(freshIdentity);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState("");
-  const [candidates, setCandidates] = useState<ReviewMeetingCandidate[]>([]);
+  const [candidates, setCandidates] = useState<ReviewCandidate[]>([]);
   const [usage, setUsage] = useState<AnalyzeMeetingUsage | null>(null);
+  const [analysisModel, setAnalysisModel] = useState<string | null>(null);
+  const [analyzedAt, setAnalyzedAt] = useState<string | null>(null);
+  const [baseline, setBaseline] = useState(() => snapshotOf(emptyMeetingDraft(), [], null, null));
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
   const [copied, setCopied] = useState(false);
+
+  const isDirty = snapshotOf(draft, candidates, analysisModel, analyzedAt) !== baseline;
 
   const patchDraft = (patch: Partial<MeetingDraft>) => setDraft((current) => ({ ...current, ...patch }));
 
   const hasAnalyzableContent = Boolean(draft.agendaText.trim() || draft.notesText.trim());
   const combinedLength = draft.agendaText.length + draft.notesText.length;
 
-  // No AI request happens until this is explicitly called by the "Analyze Meeting" click —
-  // loading this screen, editing fields, and loading Home all cost zero Anthropic requests.
+  // No AI request happens until this is explicitly called by the "Analyze Meeting"/
+  // "Re-analyze meeting" click — loading this screen, editing fields, saving, reopening a
+  // saved meeting, and loading Home all cost zero Anthropic requests.
   const analyze = async () => {
     if (analyzing) return; // guards against double-click/rapid-Enter re-entrancy
     if (!hasAnalyzableContent) {
@@ -75,6 +130,14 @@ export default function MeetingNotes({
       setError(
         `The agenda and notes are too long combined (${combinedLength.toLocaleString()} of ${MAX_MEETING_CONTENT_LENGTH.toLocaleString()} characters allowed). Trim it and try again.`,
       );
+      return;
+    }
+    if (
+      candidates.length > 0 &&
+      !window.confirm(
+        "Re-analyzing will replace the current Meeting Intelligence candidates with a new AI analysis. Your agenda and notes will remain.",
+      )
+    ) {
       return;
     }
     setAnalyzing(true);
@@ -99,6 +162,8 @@ export default function MeetingNotes({
       }
       setCandidates(toReviewCandidates(result.analysis.candidates));
       setUsage(result.usage);
+      setAnalysisModel(result.usage.model);
+      setAnalyzedAt(new Date().toISOString());
     } catch {
       setError("The AI service could not be reached. Check your connection and try again.");
     } finally {
@@ -108,7 +173,7 @@ export default function MeetingNotes({
 
   const patchCandidate = (
     id: string,
-    patch: Partial<Pick<ReviewMeetingCandidate, "type" | "title" | "detail" | "ownerText" | "dueText" | "durationText" | "selected">>,
+    patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "ownerText" | "dueText" | "durationText" | "selected">>,
   ) => setCandidates((current) => current.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)));
 
   const removeCandidate = (id: string) =>
@@ -116,10 +181,82 @@ export default function MeetingNotes({
 
   // Opens the existing Log Work form prefilled from the CURRENT edited candidate state —
   // never the original model output. Performs zero persistence: no Work Record is created,
-  // no provider is called, and this candidate's own review state is left exactly as-is.
-  const logAsWork = (candidate: ReviewMeetingCandidate) => {
+  // no MeetingRecord is created or updated, and this candidate's own review state is left
+  // exactly as-is. Saving a meeting and logging its completed work are separate, explicit,
+  // uncoupled user actions — see docs/AI_HANDOFF.md "Meeting Notes durability (Patch 6B)".
+  const logAsWork = (candidate: ReviewCandidate) => {
     const draftRecord = buildWorkRecordDraftFromMeetingCandidate(candidate, createDraftRecord());
     openLog(draftRecord);
+  };
+
+  const resetEditorTo = (
+    nextDraft: MeetingDraft,
+    nextCandidates: ReviewCandidate[],
+    nextIdentity: Identity,
+    nextAnalysisModel: string | null,
+    nextAnalyzedAt: string | null,
+  ) => {
+    setDraft(nextDraft);
+    setCandidates(nextCandidates);
+    setIdentity(nextIdentity);
+    setAnalysisModel(nextAnalysisModel);
+    setAnalyzedAt(nextAnalyzedAt);
+    setUsage(null);
+    setError("");
+    setSaveError("");
+    setBaseline(snapshotOf(nextDraft, nextCandidates, nextAnalysisModel, nextAnalyzedAt));
+  };
+
+  const newMeeting = () => {
+    if (isDirty && !window.confirm("Discard the changes in this meeting?")) return;
+    resetEditorTo(emptyMeetingDraft(), [], freshIdentity(), null, null);
+  };
+
+  const openMeeting = (record: MeetingRecord) => {
+    if (record.appId === identity.appId && !isDirty) return; // already open, nothing to do
+    if (isDirty && !window.confirm("Discard the changes in this meeting?")) return;
+    const nextDraft: MeetingDraft = {
+      title: record.title,
+      date: record.meetingDate,
+      meetingType: record.meetingType,
+      attendeesText: record.attendeesText,
+      agendaText: record.agendaText,
+      notesText: record.notesText,
+    };
+    const nextCandidates = record.reviewedCandidates.map((candidate) => ({ ...candidate, id: crypto.randomUUID() }));
+    resetEditorTo(nextDraft, nextCandidates, { appId: record.appId, metadata: record.metadata }, record.analysisModel, record.analyzedAt);
+  };
+
+  const saveMeeting = async () => {
+    if (saving) return;
+    setSaving(true);
+    setSaveError("");
+    const minutesText = buildDraftMinutes(draft, candidates);
+    const record: MeetingRecord = {
+      appId: identity.appId,
+      schemaVersion: MEETING_RECORD_SCHEMA_VERSION,
+      title: draft.title.trim(),
+      meetingDate: draft.date,
+      meetingType: draft.meetingType,
+      attendeesText: draft.attendeesText,
+      agendaText: draft.agendaText,
+      notesText: draft.notesText,
+      reviewedCandidates: stripReviewIds(candidates),
+      minutesText,
+      analysisModel,
+      analyzedAt,
+      metadata: identity.metadata,
+    };
+    const result = identity.metadata.version > 0 ? await updateRecord(record, identity.metadata.version) : await saveRecord(record);
+    setSaving(false);
+    if (result.status !== "success") {
+      setSaveError(
+        result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the meeting and try again.") : result.message,
+      );
+      return;
+    }
+    setIdentity({ appId: result.value.appId, metadata: result.value.metadata });
+    setBaseline(snapshotOf(draft, candidates, analysisModel, analyzedAt));
   };
 
   const minutesText = buildDraftMinutes(draft, candidates);
@@ -135,6 +272,7 @@ export default function MeetingNotes({
   };
 
   const selectedCount = candidates.filter((candidate) => candidate.selected).length;
+  const isSavedMeeting = identity.metadata.version > 0;
 
   return (
     <div className="screen-inner">
@@ -145,7 +283,12 @@ export default function MeetingNotes({
           <p>Before the meeting, jot an agenda. During and after, take notes. Then analyze for a reviewable summary.</p>
         </div>
       </div>
-      <p className="muted-copy">Meeting Notes V1 is a review workspace. Meeting content is not saved yet.</p>
+      <p className="muted-copy">
+        {storageMode === "sharepoint"
+          ? "SharePoint DEV connected — meeting records are saved to your IU Work Tracker workspace when you choose Save Meeting."
+          : "Preview mode — meeting records are not durable in this mode."}
+        {isDirty && <span className="sample-label" style={{ marginLeft: 8 }}>Unsaved changes</span>}
+      </p>
 
       <section className="panel">
         <div className="form-two">
@@ -175,6 +318,17 @@ export default function MeetingNotes({
             <input value={draft.attendeesText} onChange={(event) => patchDraft({ attendeesText: event.target.value })} placeholder="e.g. Greg, Annie, Kim" />
           </label>
         </div>
+        <footer className="log-footer">
+          <button className="ghost-button" onClick={newMeeting}>
+            New Meeting
+          </button>
+          <div>
+            {saveError && <span style={{ marginRight: 10 }}>{saveError}</span>}
+            <button className="primary-action" onClick={() => void saveMeeting()} disabled={saving || !isDirty}>
+              {saving ? "Saving…" : "Save Meeting"}
+            </button>
+          </div>
+        </footer>
       </section>
 
       <div className="meeting-columns">
@@ -215,26 +369,36 @@ export default function MeetingNotes({
         </footer>
       </section>
 
-      {candidates.length > 0 && (
+      {analyzedAt && (
         <section className="panel">
           <p className="eyebrow">Meeting Intelligence — review before doing anything with these</p>
-          <p className="muted-copy">Selected candidates are ready for review. Nothing has been saved yet.</p>
-          <div className="candidate-summary">
-            <span>{candidates.length} candidate{candidates.length === 1 ? "" : "s"}</span>
-            <span>{selectedCount} selected</span>
-            <span>{candidates.length - selectedCount} ignored</span>
-          </div>
-          <div className="candidate-list">
-            {candidates.map((candidate) => (
-              <MeetingCandidateCard
-                key={candidate.id}
-                candidate={candidate}
-                onPatch={(patch) => patchCandidate(candidate.id, patch)}
-                onRemove={() => removeCandidate(candidate.id)}
-                onLogAsWork={() => logAsWork(candidate)}
-              />
-            ))}
-          </div>
+          <p className="muted-copy">Selected candidates are ready for review.{!isSavedMeeting && " Nothing has been saved yet."}</p>
+          {candidates.length === 0 ? (
+            <div className="empty">
+              <span>○</span>
+              <strong>No useful candidates found</strong>
+              <p>The agenda or notes may have been too short or too vague to segment. You can edit them and re-analyze.</p>
+            </div>
+          ) : (
+            <>
+              <div className="candidate-summary">
+                <span>{candidates.length} candidate{candidates.length === 1 ? "" : "s"}</span>
+                <span>{selectedCount} selected</span>
+                <span>{candidates.length - selectedCount} ignored</span>
+              </div>
+              <div className="candidate-list">
+                {candidates.map((candidate) => (
+                  <MeetingCandidateCard
+                    key={candidate.id}
+                    candidate={candidate}
+                    onPatch={(patch) => patchCandidate(candidate.id, patch)}
+                    onRemove={() => removeCandidate(candidate.id)}
+                    onLogAsWork={() => logAsWork(candidate)}
+                  />
+                ))}
+              </div>
+            </>
+          )}
           {usage && (
             <p className="muted-copy">
               Model: {usage.model} · {usage.inputTokens.toLocaleString()} in / {usage.outputTokens.toLocaleString()} out tokens
@@ -243,19 +407,51 @@ export default function MeetingNotes({
         </section>
       )}
 
-      {candidates.length > 0 && (
-        <section className="panel">
-          <p className="eyebrow">Draft Minutes</p>
-          <pre className="draft-minutes">{minutesText}</pre>
-          <footer className="log-footer">
-            <span />
-            <button className="primary-action" onClick={() => void copyMinutes()}>
-              {copied ? "Copied!" : "Copy Minutes"}
-            </button>
-          </footer>
-        </section>
-      )}
+      <section className="panel">
+        <p className="eyebrow">Draft Minutes</p>
+        <pre className="draft-minutes">{minutesText}</pre>
+        <footer className="log-footer">
+          <span />
+          <button className="primary-action" onClick={() => void copyMinutes()}>
+            {copied ? "Copied!" : "Copy Minutes"}
+          </button>
+        </footer>
+      </section>
+
+      <section className="panel list-panel">
+        <div className="panel-heading">
+          <h2>Saved Meetings</h2>
+          <span className="sample-label">{records.length}</span>
+        </div>
+        {loadFailed && <p className="muted-copy">Saved meetings could not be loaded. Try reloading the page.</p>}
+        {records.length ? (
+          records.map((record) => <SavedMeetingRow key={record.appId} record={record} onOpen={() => openMeeting(record)} />)
+        ) : (
+          !loadFailed && <p className="muted-copy">No meetings saved yet.</p>
+        )}
+      </section>
     </div>
+  );
+}
+
+function SavedMeetingRow({ record, onOpen }: { record: MeetingRecord; onOpen: () => void }) {
+  const summary = record.reviewedCandidates.find((candidate) => candidate.type === "SUMMARY");
+  return (
+    <button
+      className="record-row"
+      style={{ width: "100%", cursor: "pointer", flexWrap: "wrap", minHeight: "auto", padding: "10px 4px" }}
+      onClick={onOpen}
+    >
+      <span className="record-dot orbit" />
+      <span>
+        <strong>{record.title || "Untitled meeting"}</strong>
+        <small>
+          {record.meetingDate}
+          {record.meetingType ? ` · ${record.meetingType}` : ""}
+          {summary ? ` · ${summary.title}` : ""}
+        </small>
+      </span>
+    </button>
   );
 }
 
@@ -265,9 +461,9 @@ function MeetingCandidateCard({
   onRemove,
   onLogAsWork,
 }: {
-  candidate: ReviewMeetingCandidate;
+  candidate: ReviewCandidate;
   onPatch: (
-    patch: Partial<Pick<ReviewMeetingCandidate, "type" | "title" | "detail" | "ownerText" | "dueText" | "durationText" | "selected">>,
+    patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "ownerText" | "dueText" | "durationText" | "selected">>,
   ) => void;
   onRemove: () => void;
   onLogAsWork: () => void;

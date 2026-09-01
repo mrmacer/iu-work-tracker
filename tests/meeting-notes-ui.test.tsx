@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import MeetingNotes from "../app/MeetingNotes";
 import type { AnalyzeMeetingResult } from "../lib/anthropic-meeting-analysis";
+import type { MeetingRecord } from "../lib/meeting-intelligence-models";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 
 afterEach(() => {
@@ -23,8 +24,18 @@ function baseWorkRecord(): WorkRecord {
   };
 }
 
-function renderMeeting() {
-  return render(<MeetingNotes openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+function renderMeeting(overrides: Partial<{ records: MeetingRecord[]; loadFailed: boolean }> = {}) {
+  return render(
+    <MeetingNotes
+      openLog={vi.fn()}
+      createDraftRecord={baseWorkRecord}
+      records={overrides.records ?? []}
+      saveRecord={vi.fn()}
+      updateRecord={vi.fn()}
+      loadFailed={overrides.loadFailed ?? false}
+      storageMode="memory"
+    />,
+  );
 }
 
 const SUCCESS_RESULT: AnalyzeMeetingResult = {
@@ -74,9 +85,9 @@ describe("MeetingNotes — details/agenda/notes editing, zero-cost load", () => 
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it("shows the non-durable notice", () => {
+  it("shows the storage-mode-aware durability notice", () => {
     renderMeeting();
-    expect(screen.getByText("Meeting Notes V1 is a review workspace. Meeting content is not saved yet.")).toBeTruthy();
+    expect(screen.getByText("Preview mode — meeting records are not durable in this mode.")).toBeTruthy();
   });
 
   it("meeting details are editable", async () => {

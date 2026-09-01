@@ -21,6 +21,12 @@ import {
   selectNeedsAttention,
   selectWaiting,
 } from "../lib/inbox-action-center";
+import type { MeetingRecord } from "../lib/meeting-intelligence-models";
+import {
+  selectMeetingRecordProvider,
+  type MeetingRecordProvider,
+  type MeetingRecordResult,
+} from "../lib/meeting-record-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
@@ -103,7 +109,8 @@ function emptyRecord(): WorkRecord {
 export default function IUWorkTracker({
   dataProvider,
   inboxDataProvider,
-}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider } = {}) {
+  meetingDataProvider,
+}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider; meetingDataProvider?: MeetingRecordProvider } = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
@@ -141,6 +148,49 @@ export default function IUWorkTracker({
       live = false;
     };
   }, []);
+  const meetingProvider = useRef<MeetingRecordProvider | null>(meetingDataProvider ?? null);
+  const [meetingRecords, setMeetingRecords] = useState<MeetingRecord[]>([]);
+  const [meetingLoadFailed, setMeetingLoadFailed] = useState(false);
+  useEffect(() => {
+    // Independent of the Work Record and Inbox Intelligence loads: a failure here never
+    // affects them, and vice versa. Read-only list() call — zero Anthropic calls, matching
+    // docs/AI_HANDOFF.md "Meeting Notes V1" cost discipline.
+    let live = true;
+    (async () => {
+      if (!meetingProvider.current) {
+        const selected = await selectMeetingRecordProvider();
+        meetingProvider.current = selected.provider;
+      }
+      const result = await meetingProvider.current.list();
+      if (!live) return;
+      if (result.status === "success") setMeetingRecords(result.value);
+      else setMeetingLoadFailed(true);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  const saveMeetingRecord = async (record: MeetingRecord): Promise<MeetingRecordResult<MeetingRecord>> => {
+    const active = meetingProvider.current;
+    if (!active) return { status: "network_error", message: "The meeting store is still starting up. Try again in a moment." };
+    const result = await active.create(record);
+    if (result.status === "success") {
+      setMeetingRecords((current) => [result.value, ...current.filter((item) => item.appId !== result.value.appId)]);
+    }
+    return result;
+  };
+  const updateMeetingRecord = async (
+    record: MeetingRecord,
+    expectedVersion: number,
+  ): Promise<MeetingRecordResult<MeetingRecord>> => {
+    const active = meetingProvider.current;
+    if (!active) return { status: "network_error", message: "The meeting store is still starting up. Try again in a moment." };
+    const result = await active.update(record, expectedVersion);
+    if (result.status === "success") {
+      setMeetingRecords((current) => current.map((item) => (item.appId === result.value.appId ? result.value : item)));
+    }
+    return result;
+  };
   const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
     const active = inboxProvider.current;
     if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
@@ -359,7 +409,15 @@ export default function IUWorkTracker({
           ) : view === "voice" ? (
             <VoiceIntelligence openLog={openLog} createDraftRecord={emptyRecord} />
           ) : (
-            <MeetingNotes openLog={openLog} createDraftRecord={emptyRecord} />
+            <MeetingNotes
+              openLog={openLog}
+              createDraftRecord={emptyRecord}
+              records={meetingRecords}
+              saveRecord={saveMeetingRecord}
+              updateRecord={updateMeetingRecord}
+              loadFailed={meetingLoadFailed}
+              storageMode={storageMode}
+            />
           )}
         </section>
       </div>

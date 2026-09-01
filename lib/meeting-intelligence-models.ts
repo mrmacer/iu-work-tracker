@@ -1,4 +1,6 @@
 import { z } from "zod";
+import type { ProviderMetadata } from "./models";
+import type { ValidationIssue } from "./validation";
 import { isDurationSupportedByTranscript } from "./voice-intelligence-models";
 
 // Runtime shape AI extraction must conform to. Candidates are proposals only, never
@@ -97,4 +99,99 @@ export function normalizeMeetingAnalysis(analysis: MeetingAnalysis, meetingText:
   return {
     candidates: dedupeCandidates(stripUnsupportedDurations(analysis.candidates, meetingText)),
   };
+}
+
+// ---------------------------------------------------------------------------------------
+// Durable Meeting Record (Patch 6B — docs/AI_HANDOFF.md "Meeting Notes durability"). A
+// MeetingRecord is the one durable artifact this patch introduces: meeting details, agenda,
+// notes, the CURRENT human-reviewed candidate state, and the deterministic minutes composed
+// from that state. Nothing here triggers a second AI request — see
+// lib/anthropic-meeting-analysis.ts, called only from the explicit Analyze/Re-analyze action.
+// ---------------------------------------------------------------------------------------
+
+export const MEETING_RECORD_SCHEMA_VERSION = 1 as const;
+
+/**
+ * A reviewed candidate exactly as it will be durably persisted — the AI candidate's fields
+ * plus the human's selected/ignored decision. Deliberately does NOT include the client-only
+ * React list key the review UI uses (`id`) — that is transient UI state, not domain data, and
+ * is regenerated on load. Persisting exactly the CURRENT edited candidate state — never the
+ * original AI output — is the human-authority guarantee this record type exists to preserve.
+ */
+export const ReviewedMeetingCandidateSchema = MeetingCandidateSchema.extend({
+  selected: z.boolean(),
+}).strict();
+
+export const ReviewedMeetingCandidatesSchema = z.array(ReviewedMeetingCandidateSchema).max(60);
+
+export type ReviewedMeetingCandidate = z.infer<typeof ReviewedMeetingCandidateSchema>;
+
+/**
+ * A durable Meeting Record. `reviewedCandidates` may be an empty array and `minutesText` may
+ * be the metadata-only form of buildDraftMinutes() — a meeting may be saved before it is ever
+ * analyzed (an agenda prepared ahead of time, or notes still in progress); nothing is
+ * fabricated to fill these in. `analysisModel`/`analyzedAt` are only ever set together, and
+ * only once at least one explicit analysis has completed.
+ */
+export type MeetingRecord = {
+  appId: string;
+  schemaVersion: typeof MEETING_RECORD_SCHEMA_VERSION;
+  title: string;
+  meetingDate: string;
+  meetingType: string;
+  attendeesText: string;
+  agendaText: string;
+  notesText: string;
+  reviewedCandidates: ReviewedMeetingCandidate[];
+  minutesText: string;
+  analysisModel: string | null;
+  analyzedAt: string | null;
+  metadata: ProviderMetadata;
+};
+
+/**
+ * Builds a fresh, unsaved durable record from the current editor state. `metadata.version`
+ * stays `0` so the provider's create()/update() branch always routes a first save through
+ * create() — the exact same convention WorkRecord and InboxIntelligenceRecord already use.
+ * Pure: performs no I/O.
+ */
+export function buildMeetingRecord(input: {
+  appId: string;
+  title: string;
+  meetingDate: string;
+  meetingType: string;
+  attendeesText: string;
+  agendaText: string;
+  notesText: string;
+  reviewedCandidates: ReviewedMeetingCandidate[];
+  minutesText: string;
+  analysisModel: string | null;
+  analyzedAt: string | null;
+}): MeetingRecord {
+  return {
+    ...input,
+    schemaVersion: MEETING_RECORD_SCHEMA_VERSION,
+    metadata: { version: 0, createdAt: "", modifiedAt: "", syncState: "saved" },
+  };
+}
+
+/**
+ * Runtime-shape validation for a record about to be written — mirrors
+ * validateInboxIntelligenceRecord's discipline (lib/sharepoint-inbox-intelligence.ts): a
+ * human edit in the review screen must satisfy the same shape the AI extraction pipeline
+ * itself enforces, so this never accepts something the AI path would have rejected.
+ */
+export function validateMeetingRecordShape(record: MeetingRecord): ValidationIssue[] {
+  const issues: ValidationIssue[] = [];
+  if (record.schemaVersion !== MEETING_RECORD_SCHEMA_VERSION) {
+    issues.push({ path: "schemaVersion", code: "unsupported_schema", message: `schemaVersion must be ${MEETING_RECORD_SCHEMA_VERSION}.` });
+  }
+  const candidatesResult = ReviewedMeetingCandidatesSchema.safeParse(record.reviewedCandidates);
+  if (!candidatesResult.success) {
+    issues.push({ path: "reviewedCandidates", code: "invalid_candidates", message: "The reviewed Meeting Intelligence candidates no longer match the expected shape." });
+  }
+  if ((record.analysisModel === null) !== (record.analyzedAt === null)) {
+    issues.push({ path: "analysisModel", code: "inconsistent_analysis_metadata", message: "analysisModel and analyzedAt must both be set or both be null." });
+  }
+  return issues;
 }

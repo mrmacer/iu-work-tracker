@@ -59,3 +59,21 @@ All are requested by the frontend through `DataProvider` methods. The seed array
 ## Validation and save ownership
 
 `lib/validation.ts` is shared by provider and API paths. It validates required strings, canonical IDs, arrays, reach, duration, engagement scope, schema version, and nested ORBIT invariants. A create receives server timestamps and version `1`. An update supplies `expectedVersion`; successful updates increment the version, preserve `createdAt`, and receive a server-owned `modifiedAt`.
+
+## MeetingRecord (Patch 6B — durable, SharePoint list not yet provisioned)
+
+A second durable resource, independent of `WorkRecord`, following the identical `DataProvider`-style boundary and optimistic-concurrency discipline described above. See `docs/AI_HANDOFF.md` "Meeting Notes durability (Patch 6B)" for the full design rationale.
+
+| Concern | Runtime fields and rules |
+| --- | --- |
+| Identity | `appId`, `schemaVersion` (currently `1`) |
+| Meeting details | `title`, `meetingDate`, `meetingType`, `attendeesText` (plain text — no entity resolution) |
+| Source content | `agendaText`, `notesText` — the same free text the AI analysis pipeline reads, now durable |
+| Reviewed intelligence | `reviewedCandidates: ReviewedMeetingCandidate[]` — **one JSON blob**, not per-type child lists. Each item is a `MeetingCandidate` (`type`, `title`, `detail`, `sourceExcerpt`, `ownerText`, `dueText`, `durationText`) plus the human's `selected` decision. This is always the CURRENT human-reviewed state, never the original AI output. |
+| Minutes | `minutesText` — deterministic output of `buildDraftMinutes()` at save time; no AI call |
+| Analysis provenance | `analysisModel`, `analyzedAt` — both `null` (no analysis has run yet) or both set together; never independently |
+| Persistence | the same nested `metadata` (`ProviderMetadata`) as `WorkRecord` — provider ID, numeric version, SharePoint's own Created/Modified, sync state |
+
+Relationships intentionally NOT present: no `projectIds`/`organizationIds`/`contactIds`/`categoryIds`, no district/people entity resolution on `attendeesText`. No delete operation exists for this resource in Patch 6B — `MeetingRecordProvider` exposes `list`/`create`/`update` only.
+
+`MeetingRecord` and `WorkRecord` persistence are deliberately uncoupled: saving a meeting never creates or updates a `WorkRecord`, and the "Log as work" handoff (`buildWorkRecordDraftFromMeetingCandidate()`) never creates or updates a `MeetingRecord`.
