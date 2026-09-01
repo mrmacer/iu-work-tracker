@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import type { AnalyzeTranscriptResult, AnalyzeTranscriptUsage } from "../lib/anthropic-voice-analysis";
+import type { WorkRecord } from "../lib/models";
 import { MAX_TRANSCRIPT_LENGTH } from "../lib/voice-intelligence-config";
 import {
   VOICE_CANDIDATE_TYPES,
@@ -9,6 +10,7 @@ import {
   type VoiceCandidate,
   type VoiceCandidateType,
 } from "../lib/voice-intelligence-models";
+import { buildWorkRecordDraftFromVoiceCandidate } from "../lib/voice-intelligence-work-record";
 
 type Phase = "paste" | "review";
 
@@ -25,7 +27,13 @@ function toReviewCandidates(candidates: VoiceCandidate[]): ReviewCandidate[] {
   return candidates.map((candidate) => ({ ...candidate, id: crypto.randomUUID(), selected: true }));
 }
 
-export default function VoiceIntelligence() {
+export default function VoiceIntelligence({
+  openLog,
+  createDraftRecord,
+}: {
+  openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
+  createDraftRecord: () => WorkRecord;
+}) {
   const [phase, setPhase] = useState<Phase>("paste");
   const [transcript, setTranscript] = useState("");
   const [analyzing, setAnalyzing] = useState(false);
@@ -80,6 +88,15 @@ export default function VoiceIntelligence() {
 
   const removeCandidate = (id: string) =>
     setCandidates((current) => current.filter((candidate) => candidate.id !== id));
+
+  // Opens the existing Log Work form prefilled from the CURRENT edited candidate state —
+  // never the original model output. Performs zero persistence: no Work Record is created,
+  // no provider is called, and this candidate's own review state is left exactly as-is. The
+  // human still reviews and explicitly saves through the existing, unmodified save path.
+  const logAsWork = (candidate: ReviewCandidate) => {
+    const draft = buildWorkRecordDraftFromVoiceCandidate(candidate, createDraftRecord());
+    openLog(draft);
+  };
 
   const backToTranscript = () => {
     setPhase("paste");
@@ -166,6 +183,7 @@ export default function VoiceIntelligence() {
                     candidate={candidate}
                     onPatch={(patch) => patchCandidate(candidate.id, patch)}
                     onRemove={() => removeCandidate(candidate.id)}
+                    onLogAsWork={() => logAsWork(candidate)}
                   />
                 ))}
               </div>
@@ -193,10 +211,12 @@ function CandidateCard({
   candidate,
   onPatch,
   onRemove,
+  onLogAsWork,
 }: {
   candidate: ReviewCandidate;
   onPatch: (patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected">>) => void;
   onRemove: () => void;
+  onLogAsWork: () => void;
 }) {
   return (
     <div className={`candidate-card${candidate.selected ? "" : " deselected"}`}>
@@ -225,6 +245,11 @@ function CandidateCard({
               ×
             </button>
           </span>
+        )}
+        {candidate.type === "COMPLETED_WORK" && (
+          <button type="button" className="candidate-log-button" onClick={onLogAsWork}>
+            Log as work
+          </button>
         )}
         <button type="button" className="ghost-button" onClick={onRemove}>
           Remove

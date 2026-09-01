@@ -355,7 +355,7 @@ export default function IUWorkTracker({
               updateRecord={updateInboxRecord}
             />
           ) : (
-            <VoiceIntelligence />
+            <VoiceIntelligence openLog={openLog} createDraftRecord={emptyRecord} />
           )}
         </section>
       </div>

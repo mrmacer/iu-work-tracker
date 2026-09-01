@@ -4,11 +4,31 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import VoiceIntelligence from "../app/VoiceIntelligence";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
+import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
+
+// This file exercises the paste/analyze/review/edit surface only. The "Log as work" handoff
+// itself (openLog/createDraftRecord wiring, eligibility, prefill mapping) is covered
+// separately in tests/voice-work-record-handoff.test.tsx — these render calls just need
+// harmless stand-in props to satisfy the component's now-required props.
+function baseWorkRecord(): WorkRecord {
+  return {
+    appId: "draft", title: "", activityDate: "2026-08-31", activityType: "", description: "", detailedNotes: "",
+    durationMinutes: 60, status: "complete", engagementScope: "none", projectIds: [], organizationIds: [], contactIds: [],
+    categoryIds: [], reach: { educatorsLeaders: 0, studentsFamilies: 0, workforceCommunity: 0, other: 0 }, evidenceSummary: "",
+    evidenceReferenceIds: [], output: "", outcome: "", nextStep: "", followUpNeeded: false, followUpDate: null,
+    orbit: { reportable: false, primaryDeliverable: null, supportingDeliverables: [], stemPocMinutes: 0, tacMinutes: 0, evidence: "" },
+    schemaVersion: WORK_RECORD_SCHEMA_VERSION, metadata: { version: 0, createdAt: "", modifiedAt: "", syncState: "saved" }, isSample: false,
+  };
+}
+
+function renderVoice() {
+  return render(<VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+}
 
 const SUCCESS_RESULT: AnalyzeTranscriptResult = {
   status: "success",
@@ -40,13 +60,13 @@ function jsonResponse(value: unknown): Response {
 describe("VoiceIntelligence — zero-cost load and explicit analysis boundary", () => {
   it("makes no request merely from rendering the screen", () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    render(<VoiceIntelligence />);
+    renderVoice();
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("rejects an empty transcript client-side without any request", async () => {
     const fetchSpy = vi.spyOn(globalThis, "fetch");
-    render(<VoiceIntelligence />);
+    renderVoice();
     const analyzeButton = screen.getByRole("button", { name: "Analyze transcript" }) as HTMLButtonElement;
     expect(analyzeButton.disabled).toBe(true);
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -55,7 +75,7 @@ describe("VoiceIntelligence — zero-cost load and explicit analysis boundary", 
   it("makes exactly one request when Analyze transcript is clicked", async () => {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(SUCCESS_RESULT));
-    render(<VoiceIntelligence />);
+    renderVoice();
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByText(/2 candidates/)).toBeTruthy());
@@ -68,7 +88,7 @@ describe("VoiceIntelligence — zero-cost load and explicit analysis boundary", 
     vi.spyOn(globalThis, "fetch").mockResolvedValue(
       jsonResponse({ status: "server_error", message: "The transcript could not be analyzed." }),
     );
-    render(<VoiceIntelligence />);
+    renderVoice();
     const textarea = screen.getByPlaceholderText(/paste the transcript/i) as HTMLTextAreaElement;
     await user.type(textarea, "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
@@ -81,7 +101,7 @@ describe("VoiceIntelligence — review and edit, zero persistence", () => {
   async function renderInReview() {
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(SUCCESS_RESULT));
-    render(<VoiceIntelligence />);
+    renderVoice();
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByText(/2 candidates/)).toBeTruthy());
@@ -176,7 +196,7 @@ describe("VoiceIntelligence — review and edit, zero persistence", () => {
   it("shows a friendly empty state when no candidates are returned", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse({ ...SUCCESS_RESULT, analysis: { candidates: [] } }));
-    render(<VoiceIntelligence />);
+    renderVoice();
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Just testing this thing out.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByText("No useful candidates found")).toBeTruthy());
