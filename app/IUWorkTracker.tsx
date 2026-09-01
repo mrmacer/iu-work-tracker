@@ -25,8 +25,9 @@ import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from 
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
+import VoiceIntelligence from "./VoiceIntelligence";
 
-type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox";
+type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox" | "voice";
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
@@ -34,6 +35,7 @@ const navItems: [View, string, string][] = [
   ["projects", "▤", "Projects"],
   ["orbit", "◎", "STEM / ORBIT"],
   ["inbox", "✉", "Inbox Intelligence"],
+  ["voice", "🎙", "Voice Intelligence"],
 ];
 const todayIso = () =>
   new Intl.DateTimeFormat("en-CA", {
@@ -343,7 +345,7 @@ export default function IUWorkTracker({
             <Projects records={records} setView={setView} projects={references.projects} />
           ) : view === "orbit" ? (
             <Orbit records={records} references={references} />
-          ) : (
+          ) : view === "inbox" ? (
             <InboxIntelligence
               references={references}
               openLog={openLog}
@@ -352,6 +354,8 @@ export default function IUWorkTracker({
               saveRecord={saveInboxRecord}
               updateRecord={updateInboxRecord}
             />
+          ) : (
+            <VoiceIntelligence />
           )}
         </section>
       </div>
@@ -609,6 +613,12 @@ function Home({
           title="Inbox Intelligence"
           copy={needsAttentionCount > 0 ? `${needsAttentionCount} need attention` : "Turn a pasted email into a work record"}
           onClick={() => setView("inbox")}
+        />
+        <Command
+          icon="🎙"
+          title="Voice Intelligence"
+          copy="Turn a transcript into actionable intelligence"
+          onClick={() => setView("voice")}
         />
       </div>
     </div>
