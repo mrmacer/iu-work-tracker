@@ -25,9 +25,10 @@ import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from 
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
+import MeetingNotes from "./MeetingNotes";
 import VoiceIntelligence from "./VoiceIntelligence";
 
-type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox" | "voice";
+type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox" | "voice" | "meeting";
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
@@ -36,6 +37,7 @@ const navItems: [View, string, string][] = [
   ["orbit", "◎", "STEM / ORBIT"],
   ["inbox", "✉", "Inbox Intelligence"],
   ["voice", "🎙", "Voice Intelligence"],
+  ["meeting", "📝", "Meeting Notes"],
 ];
 const todayIso = () =>
   new Intl.DateTimeFormat("en-CA", {
@@ -354,8 +356,10 @@ export default function IUWorkTracker({
               saveRecord={saveInboxRecord}
               updateRecord={updateInboxRecord}
             />
-          ) : (
+          ) : view === "voice" ? (
             <VoiceIntelligence openLog={openLog} createDraftRecord={emptyRecord} />
+          ) : (
+            <MeetingNotes openLog={openLog} createDraftRecord={emptyRecord} />
           )}
         </section>
       </div>
@@ -619,6 +623,12 @@ function Home({
           title="Voice Intelligence"
           copy="Turn a transcript into actionable intelligence"
           onClick={() => setView("voice")}
+        />
+        <Command
+          icon="📝"
+          title="Meeting Notes"
+          copy="Agenda, notes, and reviewable meeting intelligence"
+          onClick={() => setView("meeting")}
         />
       </div>
     </div>
