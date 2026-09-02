@@ -48,7 +48,7 @@ The V1 regional development sample previously used `org-regional`. Migration `dr
 
 - `Project`: stable ID, name, description, status (`planning`/`active`/`paused`/`complete`), and display color — optionally durable as of Patch 7 (see below).
 - `Organization`: stable ID, canonical name, and real type (`district`, `partner`, or `iu`).
-- `Contact`: stable ID, display name, role, and optional organization relationship. V1.1 only supplies sample references; it is not a CRM.
+- `Contact`: stable ID, display name, optional role, and optional organization relationship — optionally durable as of Patch 8B (see below). Not a CRM.
 - `Category`: stable ID, name, and category group.
 - `Deliverable`: canonical ORBIT code and label.
 - `ReportingConfig`: minutes per day, July school-year boundary, and quarter month ranges.
@@ -78,7 +78,7 @@ Relationships intentionally NOT present: no `projectIds`/`organizationIds`/`cont
 
 `MeetingRecord` and `WorkRecord` persistence are deliberately uncoupled: saving a meeting never creates or updates a `WorkRecord`, and the "Log as work" handoff (`buildWorkRecordDraftFromMeetingCandidate()`) never creates or updates a `MeetingRecord`.
 
-## Durable Project (Patch 7 / 7B — GREEN, live-verified against real DEV SharePoint, uncommitted)
+## Durable Project (Patch 7 / 7B — GREEN, live-verified against real DEV SharePoint, committed)
 
 Extends the existing `Project` reference-data type in place (`lib/models.ts`) rather than introducing a parallel model — see `docs/AI_HANDOFF.md` "Durable Projects (Patch 7 / 7B)" for the full design rationale. Durably persisted to the existing `IU_Projects` SharePoint list (extended in place, not replaced) via `NEXT_PUBLIC_SHAREPOINT_IU_PROJECTS_LIST_ID` — the single authoritative Project-list configuration; no second list or env var exists.
 
@@ -95,3 +95,22 @@ Extends the existing `Project` reference-data type in place (`lib/models.ts`) ra
 No record count or duration field exists on `Project` — the Projects screen always derives both by filtering `WorkRecord[]` on `projectIds.includes(project.appId)` and summing `durationMinutes`, exactly as it did before this patch. No delete operation exists for this resource — `ProjectProvider` exposes `list`/`create`/`update` only. The five seeded projects (`project-steels`, `project-ai`, `project-keystone`, `project-ecosystem`, `project-makerspace`) are not migrated into the durable store in this patch and remain exactly as they were.
 
 `DataProvider.setDurableProjects()` (`lib/data-provider.ts`) is the one deliberate coupling point: it keeps `createWorkRecord`/`updateWorkRecord`'s `projectIds` validation (`lib/validation.ts`) aware of durable projects the UI offers, without `WorkRecord` and `Project` persistence otherwise depending on each other in any way — creating or editing a Project never creates or updates a `WorkRecord`, and logging work never creates or updates a `Project`.
+
+## Durable Contact (Patch 8B — GREEN, live-verified against real DEV SharePoint, uncommitted)
+
+Extends the existing `Contact` reference-data type in place (`lib/models.ts`) rather than introducing a parallel model — see `docs/AI_HANDOFF.md` "Durable Contacts (Patch 8B)" for the full design rationale. Durably persisted to the existing `IU_Contacts` SharePoint list (extended in place, not replaced) via `NEXT_PUBLIC_SHAREPOINT_IU_CONTACTS_LIST_ID` — the single authoritative Contact-list configuration; no second list or env var exists.
+
+| Concern | Runtime fields and rules |
+| --- | --- |
+| Identity | `appId` |
+| Identity (display) | `displayName` |
+| Role | `role` — optional (relaxed from required in Patch 8B) |
+| Organization | `organizationId: string \| null` — singular, nullable, unchanged shape; points at the existing `Organization` reference set (District is `Organization.type === "district"`, not a separate model) |
+| Contact evidence | `email` — optional; matching evidence only, never the Contact's identity (`appId` remains identity) |
+| Status | `status`: `active`, `developing`, `occasional`, `dormant`, or `archived` — required, stored in `IU_Contacts`'s `Status` column as plain text (not a SharePoint Choice column); manually-created Contacts default to `active` |
+| Notes | `notes` — optional, small manual relationship note; not a biography, not a Knowledge repository |
+| Persistence | optional nested `metadata` (`ProviderMetadata`) — **present only for a durable contact** (created/loaded through `ContactProvider`); **absent for the three seeded reference-data contacts**, which is exactly how the UI decides whether to offer "Edit" |
+
+No delete operation exists for this resource — `ContactProvider` exposes `list`/`create`/`update` only; `archived` status is the V1 substitute for deletion. No `projectIds` field exists on `Contact`, and no `contactIds` field exists on `Project` — a Contact's connected Projects are meant to derive transitively through `WorkRecord.contactIds` → `WorkRecord.projectIds` in a later patch, never a direct relationship. No connected-work totals, timelines, or "Last Interaction" are stored on `Contact` — those remain out of scope for Patch 8B. The three seeded contacts (`contact-north-valley-lead`, `contact-futureworks`, `contact-iu-colleague`) are not migrated into the durable store in this patch and remain exactly as they were, now with `status: "active"` added for type compatibility.
+
+`DataProvider.setDurableContacts()` (`lib/data-provider.ts`) is the one deliberate coupling point, mirroring `setDurableProjects()` exactly: it keeps `createWorkRecord`/`updateWorkRecord`'s `contactIds` validation (`lib/validation.ts`) aware of durable contacts the UI offers, without `WorkRecord` and `Contact` persistence otherwise depending on each other in any way — creating or editing a Contact never creates or updates a `WorkRecord`, and logging work never creates or updates a `Contact`. `WorkRecord.contactIds: string[]` itself is unchanged from before this patch — it already existed, was already validated/serialized, and remains the sole Contact relationship anywhere in the codebase.

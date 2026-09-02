@@ -67,7 +67,28 @@ export type Project = {
   metadata?: ProviderMetadata;
 };
 export type Organization = { appId: string; name: string; type: "district" | "partner" | "iu" };
-export type Contact = { appId: string; displayName: string; role: string; organizationId: string | null };
+
+/**
+ * Patch 8B — Contacts (previously reference/configuration data only, see docs/DATA_MODEL.md
+ * "Reference and configuration entities") gains an optional durable dimension, following the
+ * exact Project precedent from Patch 7. `role`, `email`, `notes`, and `metadata` are all
+ * optional so the three existing seeded contacts in lib/reference-data.ts remain valid Contact
+ * values unchanged — they are simply never durable (no `metadata`). `status` is required with
+ * a locked five-value vocabulary; `organizationId` stays singular and nullable, unchanged from
+ * before this patch. A Contact with `metadata` present was created/loaded through
+ * lib/contact-provider.ts; one without it is a static seeded contact.
+ */
+export type ContactStatus = "active" | "developing" | "occasional" | "dormant" | "archived";
+export type Contact = {
+  appId: string;
+  displayName: string;
+  role?: string;
+  organizationId: string | null;
+  email?: string;
+  status: ContactStatus;
+  notes?: string;
+  metadata?: ProviderMetadata;
+};
 export type Category = { appId: string; name: string; group: "work-area" | "topic" };
 export type Deliverable = { code: string; label: string };
 export type ReportingConfig = {

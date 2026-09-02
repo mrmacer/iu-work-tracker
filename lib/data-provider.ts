@@ -48,12 +48,22 @@ export interface DataProvider {
    * persists anything itself.
    */
   setDurableProjects(projects: Project[]): void;
+  /**
+   * Patch 8B: same mechanism as setDurableProjects, for durable Contacts
+   * (lib/contact-provider.ts). createWorkRecord/updateWorkRecord validate contactIds against
+   * `this.references.contacts` — without this, a Work Record referencing a newly-created
+   * durable contact would fail validation even though the UI offers it as selectable.
+   */
+  setDurableContacts(contacts: Contact[]): void;
 }
 
 abstract class ReferenceProvider {
   protected references: ReferenceData = REFERENCE_DATA;
   setDurableProjects(durableProjects: Project[]): void {
     this.references = { ...this.references, projects: [...REFERENCE_DATA.projects, ...durableProjects] };
+  }
+  setDurableContacts(durableContacts: Contact[]): void {
+    this.references = { ...this.references, contacts: [...REFERENCE_DATA.contacts, ...durableContacts] };
   }
   async getProjects() { return structuredClone(this.references.projects); }
   async getOrganizations() { return structuredClone(this.references.organizations); }

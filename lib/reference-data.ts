@@ -16,9 +16,9 @@ export const ORGANIZATIONS: Organization[] = [
 ];
 
 export const CONTACTS: Contact[] = [
-  { appId: "contact-north-valley-lead", displayName: "Development District Lead", role: "District curriculum lead (sample)", organizationId: "org-north-valley" },
-  { appId: "contact-futureworks", displayName: "Development Partner Contact", role: "Workforce partner (sample)", organizationId: "org-futureworks" },
-  { appId: "contact-iu-colleague", displayName: "Development IU Colleague", role: "IU team member (sample)", organizationId: "org-iu" },
+  { appId: "contact-north-valley-lead", displayName: "Development District Lead", role: "District curriculum lead (sample)", organizationId: "org-north-valley", status: "active" },
+  { appId: "contact-futureworks", displayName: "Development Partner Contact", role: "Workforce partner (sample)", organizationId: "org-futureworks", status: "active" },
+  { appId: "contact-iu-colleague", displayName: "Development IU Colleague", role: "IU team member (sample)", organizationId: "org-iu", status: "active" },
 ];
 
 export const CATEGORIES: Category[] = [

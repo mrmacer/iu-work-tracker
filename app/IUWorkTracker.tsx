@@ -27,7 +27,17 @@ import {
   type MeetingRecordProvider,
   type MeetingRecordResult,
 } from "../lib/meeting-record-provider";
-import { WORK_RECORD_SCHEMA_VERSION, type Project, type ReferenceData, type WorkRecord } from "../lib/models";
+import { WORK_RECORD_SCHEMA_VERSION, type Contact, type ContactStatus, type Organization, type Project, type ReferenceData, type WorkRecord } from "../lib/models";
+import {
+  buildContactDraft,
+  CONTACT_STATUSES,
+  normalizeContactEmail,
+  normalizeContactName,
+  selectContactProvider,
+  validateContactShape,
+  type ContactProvider,
+  type ContactResult,
+} from "../lib/contact-provider";
 import {
   buildProjectDraft,
   PROJECT_STATUSES,
@@ -43,12 +53,13 @@ import InboxIntelligence from "./InboxIntelligence";
 import MeetingNotes from "./MeetingNotes";
 import VoiceIntelligence from "./VoiceIntelligence";
 
-type View = "home" | "today" | "history" | "projects" | "orbit" | "inbox" | "voice" | "meeting";
+type View = "home" | "today" | "history" | "projects" | "contacts" | "orbit" | "inbox" | "voice" | "meeting";
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
   ["history", "≡", "History"],
   ["projects", "▤", "Projects"],
+  ["contacts", "☺", "Contacts"],
   ["orbit", "◎", "STEM / ORBIT"],
   ["inbox", "✉", "Inbox Intelligence"],
   ["voice", "🎙", "Voice Intelligence"],
@@ -120,11 +131,13 @@ export default function IUWorkTracker({
   inboxDataProvider,
   meetingDataProvider,
   projectDataProvider,
+  contactDataProvider,
 }: {
   dataProvider?: DataProvider;
   inboxDataProvider?: InboxIntelligenceProvider;
   meetingDataProvider?: MeetingRecordProvider;
   projectDataProvider?: ProjectProvider;
+  contactDataProvider?: ContactProvider;
 } = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
@@ -257,8 +270,58 @@ export default function IUWorkTracker({
     projectRecordsRef.current = projectRecords;
     provider.current?.setDurableProjects(projectRecords);
   }, [projectRecords]);
+  const contactProvider = useRef<ContactProvider | null>(contactDataProvider ?? null);
+  const [contactRecords, setContactRecords] = useState<Contact[]>([]);
+  const [contactLoadFailed, setContactLoadFailed] = useState(false);
+  useEffect(() => {
+    // Independent of every other load: a failure here never affects Work Records, Inbox
+    // Intelligence, Meeting Records, or Projects, and vice versa. Read-only list() call — zero
+    // Anthropic calls, matching docs/AI_HANDOFF.md "Durable Contacts (Patch 8B)" cost discipline.
+    let live = true;
+    (async () => {
+      if (!contactProvider.current) {
+        const selected = await selectContactProvider();
+        contactProvider.current = selected.provider;
+      }
+      const result = await contactProvider.current.list();
+      if (!live) return;
+      if (result.status === "success") setContactRecords(result.value);
+      else setContactLoadFailed(true);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  const saveContact = async (contact: Contact): Promise<ContactResult<Contact>> => {
+    const active = contactProvider.current;
+    if (!active) return { status: "network_error", message: "The contact store is still starting up. Try again in a moment." };
+    const result = await active.create(contact);
+    if (result.status === "success") {
+      setContactRecords((current) => [result.value, ...current.filter((item) => item.appId !== result.value.appId)]);
+    }
+    return result;
+  };
+  const updateContact = async (contact: Contact, expectedVersion: number): Promise<ContactResult<Contact>> => {
+    const active = contactProvider.current;
+    if (!active) return { status: "network_error", message: "The contact store is still starting up. Try again in a moment." };
+    const result = await active.update(contact, expectedVersion);
+    if (result.status === "success") {
+      setContactRecords((current) => current.map((item) => (item.appId === result.value.appId ? result.value : item)));
+    }
+    return result;
+  };
+  const contactRecordsRef = useRef<Contact[]>(contactRecords);
+  useEffect(() => {
+    // Keeps the Work Record DataProvider's internal reference-contact set in sync with the
+    // currently-known durable Contacts (see lib/data-provider.ts "setDurableContacts"), so
+    // createWorkRecord/updateWorkRecord validation never rejects a contact the UI itself offers
+    // as selectable. Mirrors the Project mechanism exactly — see its comment above.
+    contactRecordsRef.current = contactRecords;
+    provider.current?.setDurableContacts(contactRecords);
+  }, [contactRecords]);
   const allProjects: Project[] = references ? [...references.projects, ...projectRecords] : projectRecords;
-  const effectiveReferences: ReferenceData | null = references ? { ...references, projects: allProjects } : null;
+  const allContacts: Contact[] = references ? [...references.contacts, ...contactRecords] : contactRecords;
+  const effectiveReferences: ReferenceData | null = references ? { ...references, projects: allProjects, contacts: allContacts } : null;
   const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
     const active = inboxProvider.current;
     if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
@@ -301,11 +364,13 @@ export default function IUWorkTracker({
           provider.current = selected.provider;
           kind = selected.kind;
         }
-        // Patch 7: sync whatever durable Projects are already known (via the ref, not the
-        // possibly-stale `projectRecords` closure — see the projectRecordsRef effect below) the
-        // moment this provider becomes available, so createWorkRecord/updateWorkRecord
-        // validation is correct regardless of which provider-load effect resolves first.
+        // Patch 7 / 8B: sync whatever durable Projects/Contacts are already known (via the
+        // refs, not the possibly-stale state closures — see the projectRecordsRef/
+        // contactRecordsRef effects below) the moment this provider becomes available, so
+        // createWorkRecord/updateWorkRecord validation is correct regardless of which
+        // provider-load effect resolves first.
         provider.current.setDurableProjects(projectRecordsRef.current);
+        provider.current.setDurableContacts(contactRecordsRef.current);
         await loadFrom(provider.current);
       } catch {
         // Selecting or loading from the active provider failed (including a SharePoint
@@ -474,6 +539,14 @@ export default function IUWorkTracker({
               loadFailed={projectLoadFailed}
               saveProject={saveProject}
               updateProject={updateProject}
+            />
+          ) : view === "contacts" ? (
+            <Contacts
+              contacts={allContacts}
+              organizations={effectiveReferences.organizations}
+              loadFailed={contactLoadFailed}
+              saveContact={saveContact}
+              updateContact={updateContact}
             />
           ) : view === "orbit" ? (
             <Orbit records={records} references={effectiveReferences} />
@@ -1185,6 +1258,315 @@ function ProjectFormModal({
   );
 }
 
+const CONTACT_STATUS_LABELS: Record<ContactStatus, string> = {
+  active: "Active",
+  developing: "Developing",
+  occasional: "Occasional",
+  dormant: "Dormant",
+  archived: "Archived",
+};
+
+function emptyContactDraft(): Contact {
+  return buildContactDraft({
+    appId: crypto.randomUUID(),
+    displayName: "",
+    role: undefined,
+    organizationId: null,
+    email: undefined,
+    status: "active",
+    notes: undefined,
+  });
+}
+
+/**
+ * Patch 8B — Durable Contacts. Deliberately small: identity/basic metadata only. No connected
+ * work, no timeline, no Last Interaction, no Waiting On — those are Patch 8C. See
+ * docs/AI_HANDOFF.md "Durable Contacts (Patch 8B)".
+ */
+function Contacts({
+  contacts,
+  organizations,
+  loadFailed,
+  saveContact,
+  updateContact,
+}: {
+  contacts: Contact[];
+  organizations: Organization[];
+  loadFailed: boolean;
+  saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
+  updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
+}) {
+  const [search, setSearch] = useState("");
+  const [showArchived, setShowArchived] = useState(false);
+  const [modalContact, setModalContact] = useState<Contact | null>(null);
+
+  const organizationName = (id: string | null) =>
+    id ? (organizations.find((org) => org.appId === id)?.name ?? "Unknown organization") : "";
+
+  // Case-insensitive substring match only — the same philosophy already used for Work
+  // History's search (see the `History` component above). No fuzzy/semantic matching.
+  const filtered = contacts.filter((contact) => {
+    if (!showArchived && contact.status === "archived") return false;
+    const haystack = `${contact.displayName} ${contact.role ?? ""} ${contact.email ?? ""} ${organizationName(contact.organizationId)}`.toLowerCase();
+    return haystack.includes(search.toLowerCase());
+  });
+
+  return (
+    <div className="screen-inner">
+      <PageHeading
+        eyebrow="People and organizations"
+        title="Contacts"
+        copy="Who you work with — matched to work you've already logged, not a CRM."
+      />
+      <div className="log-footer" style={{ padding: 0, marginBottom: 13 }}>
+        <label className="search-box">
+          <span>⌕</span>
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search name, role, email, or organization"
+            aria-label="Search contacts"
+          />
+        </label>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 10, color: "var(--muted)" }}>
+          <input type="checkbox" checked={showArchived} onChange={(event) => setShowArchived(event.target.checked)} />
+          Show archived
+        </label>
+      </div>
+      {loadFailed && <p className="muted-copy">Contacts could not be fully loaded. Try reloading the page.</p>}
+      <div className="project-grid">
+        {filtered.map((contact) => {
+          // Only a durable contact (created/loaded through the Contact provider) is editable.
+          // The three seeded reference-data contacts have no `metadata` and remain read-only
+          // in V1 — mirrors the Project precedent exactly.
+          const isDurable = Boolean(contact.metadata);
+          const subtitle = [contact.role, organizationName(contact.organizationId)].filter(Boolean).join(" · ");
+          return (
+            <article className="project-card" key={contact.appId}>
+              <div className="project-title">
+                <span className="status-chip">{CONTACT_STATUS_LABELS[contact.status]}</span>
+                <h2>{contact.displayName}</h2>
+                <p>{subtitle || "No role or organization on file"}</p>
+                {contact.email && <p className="muted-copy">{contact.email}</p>}
+              </div>
+              {isDurable && (
+                <div className="project-card-actions">
+                  <span />
+                  <button type="button" className="ghost-button" onClick={() => setModalContact(contact)}>
+                    Edit
+                  </button>
+                </div>
+              )}
+            </article>
+          );
+        })}
+        <button type="button" className="planned-note" aria-label="Add Contact" onClick={() => setModalContact(emptyContactDraft())}>
+          <span>＋</span>
+          <div>
+            <strong>Add Contact</strong>
+            <p>Becomes selectable in Log Work immediately.</p>
+          </div>
+        </button>
+      </div>
+      {!filtered.length && <Empty title="No matching contacts" copy="Try a different search phrase." />}
+      {modalContact && (
+        <ContactFormModal
+          contact={modalContact}
+          contacts={contacts}
+          organizations={organizations}
+          onCancel={() => setModalContact(null)}
+          onSaved={() => setModalContact(null)}
+          saveContact={saveContact}
+          updateContact={updateContact}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A single compact overlay handles both Create and Edit — see docs/AI_HANDOFF.md "Durable
+ * Contacts (Patch 8B)". Create vs. update is decided the same way every other durable resource
+ * decides it: `contact.metadata.version > 0` means the contact already has a durable identity.
+ * Duplicate detection is conservative and deterministic (trim + lowercase, exact match only —
+ * never fuzzy, never first-name-only): a name-only match is an informational warning that
+ * never blocks Save; an email match requires an explicit second confirmation ("Create Anyway")
+ * before it will save, since email is the strongest available matching signal.
+ */
+function ContactFormModal({
+  contact,
+  contacts,
+  organizations,
+  onCancel,
+  onSaved,
+  saveContact,
+  updateContact,
+}: {
+  contact: Contact;
+  contacts: Contact[];
+  organizations: Organization[];
+  onCancel: () => void;
+  onSaved: () => void;
+  saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
+  updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
+}) {
+  const [draft, setDraft] = useState<Contact>(contact);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const [emailDuplicateConfirmed, setEmailDuplicateConfirmed] = useState(false);
+  const nameRef = useRef<HTMLInputElement>(null);
+  const isEditing = (draft.metadata?.version ?? 0) > 0;
+
+  useEffect(() => {
+    nameRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const patch = (change: Partial<Contact>) => setDraft((current) => ({ ...current, ...change }));
+
+  const otherContacts = contacts.filter((item) => item.appId !== draft.appId);
+  const emailDuplicate =
+    draft.email && draft.email.trim()
+      ? otherContacts.find((item) => item.email && normalizeContactEmail(item.email) === normalizeContactEmail(draft.email!))
+      : undefined;
+  const nameDuplicate = draft.displayName.trim()
+    ? otherContacts.find((item) => normalizeContactName(item.displayName) === normalizeContactName(draft.displayName))
+    : undefined;
+
+  const submit = async () => {
+    if (saving) return;
+    const shapeIssues = validateContactShape(draft);
+    if (shapeIssues.length) {
+      setError(shapeIssues[0].message);
+      return;
+    }
+    if (emailDuplicate && !emailDuplicateConfirmed) {
+      // Require an explicit second decision — never silently create a second Contact with the
+      // same email, and never silently merge. See docs/AI_HANDOFF.md "Durable Contacts (Patch
+      // 8B)" duplicate-detection rules.
+      setEmailDuplicateConfirmed(true);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    const result = isEditing ? await updateContact(draft, draft.metadata!.version) : await saveContact(draft);
+    setSaving(false);
+    if (result.status !== "success") {
+      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the contact and try again.") : result.message);
+      return;
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="contact-modal-title">
+        <header className="log-header">
+          <h2 id="contact-modal-title">{isEditing ? "Edit Contact" : "Add Contact"}</h2>
+          <button onClick={onCancel} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="log-content">
+          <div className="form-stack">
+            <label>
+              <span>
+                Name <b>*</b>
+              </span>
+              <input
+                ref={nameRef}
+                value={draft.displayName}
+                onChange={(event) => {
+                  patch({ displayName: event.target.value });
+                  setEmailDuplicateConfirmed(false);
+                }}
+                placeholder="e.g. Annie Milewski"
+              />
+            </label>
+            {nameDuplicate && (
+              <p className="muted-copy" role="status">
+                Another contact is already named &ldquo;{nameDuplicate.displayName}&rdquo;. Two real people can share a name — this is just a heads up.
+              </p>
+            )}
+            <label>
+              <span>Role</span>
+              <input value={draft.role ?? ""} onChange={(event) => patch({ role: event.target.value || undefined })} placeholder="e.g. Superintendent" />
+            </label>
+            <label>
+              <span>Organization</span>
+              <select value={draft.organizationId ?? ""} onChange={(event) => patch({ organizationId: event.target.value || null })}>
+                <option value="">No organization</option>
+                {organizations.map((org) => (
+                  <option key={org.appId} value={org.appId}>
+                    {org.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Email</span>
+              <input
+                type="email"
+                value={draft.email ?? ""}
+                onChange={(event) => {
+                  patch({ email: event.target.value || undefined });
+                  setEmailDuplicateConfirmed(false);
+                }}
+                placeholder="name@example.org"
+              />
+            </label>
+            {emailDuplicate && (
+              <div className="form-error" role="alert">
+                Another contact ({emailDuplicate.displayName}) already uses this email address. Click {isEditing ? "Save Changes" : "Add Contact"} again to
+                create a separate contact anyway, or change the email.
+              </div>
+            )}
+            <label>
+              <span>Relationship status</span>
+              <select value={draft.status} onChange={(event) => patch({ status: event.target.value as ContactStatus })}>
+                {CONTACT_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {CONTACT_STATUS_LABELS[status]}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              <span>Notes</span>
+              <textarea
+                value={draft.notes ?? ""}
+                onChange={(event) => patch({ notes: event.target.value || undefined })}
+                placeholder="A sentence or two — not a biography."
+                rows={2}
+              />
+            </label>
+          </div>
+        </div>
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        )}
+        <footer className="log-footer">
+          <button className="ghost-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.displayName.trim()}>
+            {saving ? "Saving…" : isEditing ? "Save Changes" : "Add Contact"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function Orbit({ records, references }: { records: WorkRecord[]; references: ReferenceData }) {
   const reportable = records.filter((record) => record.orbit.reportable);
   const poc = reportable.reduce(
@@ -1556,7 +1938,7 @@ function LogWizard({
                     </div>
                   </fieldset>
                   <fieldset>
-                    <legend>Contacts <small>optional sample references</small></legend>
+                    <legend>Contacts <small>optional</small></legend>
                     <div className="chip-grid">
                       {references.contacts.map((item) => <button type="button" key={item.appId} className={record.contactIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("contactIds", item.appId)}>{item.displayName}</button>)}
                     </div>
