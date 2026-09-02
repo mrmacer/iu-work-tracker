@@ -71,6 +71,7 @@ const JSON_ARRAY_LIMITS: { path: string; max: number; value: (record: InboxIntel
   { path: "matchedOrganizationIds", max: 10000, value: (r) => r.matchedOrganizationIds },
   { path: "matchedDistrictIds", max: 10000, value: (r) => r.matchedDistrictIds },
   { path: "matchedProjectIds", max: 10000, value: (r) => r.matchedProjectIds },
+  { path: "matchedContactIds", max: 10000, value: (r) => r.matchedContactIds },
 ];
 
 export function validateInboxIntelligenceSharePointLimits(record: InboxIntelligenceRecord): ValidationIssue[] {
@@ -149,6 +150,11 @@ export function toSharePointFields(record: InboxIntelligenceRecord, version: num
     MatchedOrganizationIdsJson: JSON.stringify(record.matchedOrganizationIds),
     MatchedDistrictIdsJson: JSON.stringify(record.matchedDistrictIds),
     MatchedProjectIdsJson: JSON.stringify(record.matchedProjectIds),
+    // Patch 8D. REQUIRES a MatchedContactIdsJson column (Multiple lines of text, plain) on the
+    // live IU_Inbox_Intelligence list — added the same way Patch 8B's IU_Contacts columns were
+    // added, before this code writes to it. See docs/AI_HANDOFF.md "Intelligence Contact
+    // matching (Patch 8D)".
+    MatchedContactIdsJson: JSON.stringify(record.matchedContactIds),
     SuggestedWorkType: record.analysis.suggestedWorkType,
     SuggestedWorkRecordDescription: record.analysis.suggestedWorkRecord.description,
     LinkedWorkRecordAppId: record.linkedWorkRecordAppId,
@@ -258,6 +264,9 @@ export function fromSharePointItem(item: GraphListItem): InboxIntelligenceRecord
     matchedOrganizationIds: parseJsonStringArray(fields.MatchedOrganizationIdsJson, "MatchedOrganizationIdsJson"),
     matchedDistrictIds: parseJsonStringArray(fields.MatchedDistrictIdsJson, "MatchedDistrictIdsJson"),
     matchedProjectIds: parseJsonStringArray(fields.MatchedProjectIdsJson, "MatchedProjectIdsJson"),
+    // Missing field (a list item written before the column existed) reads back as [] via
+    // parseJsonStringArray's undefined-handling — never a parse error on old items.
+    matchedContactIds: parseJsonStringArray(fields.MatchedContactIdsJson, "MatchedContactIdsJson"),
     status: status as InboxIntelligenceStatus,
     resolvedAt: typeof fields.ResolvedAt === "string" ? fields.ResolvedAt : null,
     linkedWorkRecordAppId: fields.LinkedWorkRecordAppId ? String(fields.LinkedWorkRecordAppId) : null,

@@ -101,6 +101,12 @@ export type InboxIntelligenceRecord = {
   matchedOrganizationIds: string[];
   matchedDistrictIds: string[];
   matchedProjectIds: string[];
+  // Patch 8D — durable Contact identity resolution. Unlike matched*Ids above (silent,
+  // automatic, exact-name-only), matchedContactIds is populated ONLY from explicit human
+  // "Match Existing" / "Add Person" decisions made in the review UI (lib/contact-matching.ts)
+  // — never auto-resolved at save time. See docs/AI_HANDOFF.md "Intelligence Contact matching
+  // (Patch 8D)".
+  matchedContactIds: string[];
   status: InboxIntelligenceStatus;
   resolvedAt: string | null;
   linkedWorkRecordAppId: string | null;
@@ -150,6 +156,12 @@ export function buildInboxIntelligenceRecord(
   sourceExcerpt: string,
   references: ReferenceData,
   analyzedAt: string,
+  // Patch 8D — the human's reviewed Contact matches, computed by the review UI
+  // (lib/contact-matching.ts) BEFORE this call. Deliberately not auto-resolved here the way
+  // Organization/District/Project are above — see the field's own doc comment on
+  // InboxIntelligenceRecord for why. Defaults to [] so every existing call site (and every
+  // existing test fixture built on this function) keeps working unchanged.
+  matchedContactIds: string[] = [],
 ): InboxIntelligenceRecord {
   const matches = resolveEmailAnalysisEntities(analysis, references);
   return {
@@ -162,6 +174,7 @@ export function buildInboxIntelligenceRecord(
     matchedOrganizationIds: matches.organizationIds,
     matchedDistrictIds: matches.districtIds,
     matchedProjectIds: matches.projectIds,
+    matchedContactIds: dedupe(matchedContactIds),
     status: "open",
     resolvedAt: null,
     linkedWorkRecordAppId: null,

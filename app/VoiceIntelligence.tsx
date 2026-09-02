@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { AnalyzeTranscriptResult, AnalyzeTranscriptUsage } from "../lib/anthropic-voice-analysis";
-import type { WorkRecord } from "../lib/models";
+import type { Contact, ReferenceData, WorkRecord } from "../lib/models";
 import { MAX_TRANSCRIPT_LENGTH } from "../lib/voice-intelligence-config";
 import {
   VOICE_CANDIDATE_TYPES,
@@ -11,17 +11,25 @@ import {
   type VoiceCandidateType,
 } from "../lib/voice-intelligence-models";
 import { buildWorkRecordDraftFromVoiceCandidate } from "../lib/voice-intelligence-work-record";
+import ContactFormModal, { emptyContactDraft } from "./ContactFormModal";
+import ContactMatchPanel from "./ContactMatchPanel";
+import { matchContactCandidates, type ContactMatchDecision } from "../lib/contact-matching";
+import type { ContactResult } from "../lib/contact-provider";
 
 type Phase = "paste" | "review";
 
 /**
- * Local browser review state only — an AI candidate plus the two fields the review UI needs
- * that the model never produces: a stable React key and whether the user has it selected.
- * Nothing here is ever written to SharePoint, Work Records, Inbox Intelligence, People,
- * Organizations, Projects, a Knowledge Base, or any browser storage — see
- * docs/AI_HANDOFF.md "Voice Intelligence V1".
+ * Local browser review state only — an AI candidate plus the fields the review UI needs that
+ * the model never produces: a stable React key, whether the user has it selected, and — Patch
+ * 8D, PERSON candidates only — a deterministic Contact-match review decision. Nothing here is
+ * ever written to SharePoint, Work Records, Inbox Intelligence, Organizations, Projects, a
+ * Knowledge Base, or any browser storage: Voice Intelligence has no durable persistence at all
+ * (see docs/AI_HANDOFF.md "Voice Intelligence V1"), so contactDecision is exactly as transient
+ * as every other field here — a Contact created via "Add Person" IS durably saved (it reuses
+ * the real Contact creation path, see app/ContactFormModal.tsx), but the fact that THIS
+ * transcript's candidate matches it is not persisted anywhere once the page reloads.
  */
-type ReviewCandidate = VoiceCandidate & { id: string; selected: boolean };
+type ReviewCandidate = VoiceCandidate & { id: string; selected: boolean; contactDecision?: ContactMatchDecision };
 
 function toReviewCandidates(candidates: VoiceCandidate[]): ReviewCandidate[] {
   return candidates.map((candidate) => ({ ...candidate, id: crypto.randomUUID(), selected: true }));
@@ -30,9 +38,15 @@ function toReviewCandidates(candidates: VoiceCandidate[]): ReviewCandidate[] {
 export default function VoiceIntelligence({
   openLog,
   createDraftRecord,
+  references,
+  saveContact,
+  updateContact,
 }: {
   openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
   createDraftRecord: () => WorkRecord;
+  references: ReferenceData;
+  saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
+  updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
 }) {
   const [phase, setPhase] = useState<Phase>("paste");
   const [transcript, setTranscript] = useState("");
@@ -83,11 +97,19 @@ export default function VoiceIntelligence({
     }
   };
 
-  const patchCandidate = (id: string, patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected">>) =>
-    setCandidates((current) => current.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)));
+  const patchCandidate = (
+    id: string,
+    patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision">>,
+  ) => setCandidates((current) => current.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)));
 
   const removeCandidate = (id: string) =>
     setCandidates((current) => current.filter((candidate) => candidate.id !== id));
+
+  // Patch 8D — deterministic Contact matching for PERSON candidates only. Zero AI calls, zero
+  // network calls: see lib/contact-matching.ts. contactDecision is transient exactly like
+  // every other Voice review field — see the ReviewCandidate doc comment above.
+  const [addPersonCandidateId, setAddPersonCandidateId] = useState<string | null>(null);
+  const addPersonCandidate = candidates.find((candidate) => candidate.id === addPersonCandidateId) ?? null;
 
   // Opens the existing Log Work form prefilled from the CURRENT edited candidate state —
   // never the original model output. Performs zero persistence: no Work Record is created,
@@ -107,6 +129,7 @@ export default function VoiceIntelligence({
     setCandidates([]);
     setUsage(null);
     setError("");
+    setAddPersonCandidateId(null);
     clearTranscript();
   };
 
@@ -181,9 +204,11 @@ export default function VoiceIntelligence({
                   <CandidateCard
                     key={candidate.id}
                     candidate={candidate}
+                    references={references}
                     onPatch={(patch) => patchCandidate(candidate.id, patch)}
                     onRemove={() => removeCandidate(candidate.id)}
                     onLogAsWork={() => logAsWork(candidate)}
+                    onAddPerson={() => setAddPersonCandidateId(candidate.id)}
                   />
                 ))}
               </div>
@@ -203,20 +228,39 @@ export default function VoiceIntelligence({
           </footer>
         </section>
       )}
+
+      {addPersonCandidate && (
+        <ContactFormModal
+          contact={{ ...emptyContactDraft(), displayName: addPersonCandidate.title }}
+          contacts={references.contacts}
+          organizations={references.organizations}
+          onCancel={() => setAddPersonCandidateId(null)}
+          onSaved={(savedContact) => {
+            patchCandidate(addPersonCandidate.id, { contactDecision: { type: "matched", contactAppId: savedContact.appId } });
+            setAddPersonCandidateId(null);
+          }}
+          saveContact={saveContact}
+          updateContact={updateContact}
+        />
+      )}
     </div>
   );
 }
 
 function CandidateCard({
   candidate,
+  references,
   onPatch,
   onRemove,
   onLogAsWork,
+  onAddPerson,
 }: {
   candidate: ReviewCandidate;
-  onPatch: (patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected">>) => void;
+  references: ReferenceData;
+  onPatch: (patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision">>) => void;
   onRemove: () => void;
   onLogAsWork: () => void;
+  onAddPerson: () => void;
 }) {
   return (
     <div className={`candidate-card${candidate.selected ? "" : " deselected"}`}>
@@ -269,6 +313,19 @@ function CandidateCard({
         onChange={(event) => onPatch({ detail: event.target.value })}
       />
       <p className="candidate-source">&ldquo;{candidate.sourceExcerpt}&rdquo;</p>
+      {candidate.type === "PERSON" && (
+        <ContactMatchPanel
+          personName={candidate.title}
+          candidates={matchContactCandidates(candidate.title, references.contacts)}
+          decision={candidate.contactDecision}
+          contacts={references.contacts}
+          organizations={references.organizations}
+          onMatch={(contactAppId) => onPatch({ contactDecision: { type: "matched", contactAppId } })}
+          onIgnore={() => onPatch({ contactDecision: { type: "ignored" } })}
+          onReset={() => onPatch({ contactDecision: undefined })}
+          onAddPerson={onAddPerson}
+        />
+      )}
     </div>
   );
 }

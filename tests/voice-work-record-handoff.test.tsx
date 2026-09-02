@@ -12,6 +12,7 @@ import IUWorkTracker from "../app/IUWorkTracker";
 import { MemoryDataProvider } from "../lib/data-provider";
 import { SessionInboxIntelligenceProvider } from "../lib/inbox-intelligence-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
+import { REFERENCE_DATA } from "../lib/reference-data";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import { VOICE_CANDIDATE_TYPES, type VoiceCandidateType } from "../lib/voice-intelligence-models";
 
@@ -57,7 +58,15 @@ describe("Log as work — eligibility", () => {
   it.each(VOICE_CANDIDATE_TYPES)("candidate type %s", async (type) => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith(type)));
-    render(<VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    render(
+      <VoiceIntelligence
+        openLog={vi.fn()}
+        createDraftRecord={baseWorkRecord}
+        references={REFERENCE_DATA}
+        saveContact={vi.fn()}
+        updateContact={vi.fn()}
+      />,
+    );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByText("1 candidate")).toBeTruthy());
@@ -73,7 +82,15 @@ describe("Log as work — eligibility", () => {
   it("removes Log as work when the current candidate is changed away from COMPLETED_WORK", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("COMPLETED_WORK")));
-    render(<VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    render(
+      <VoiceIntelligence
+        openLog={vi.fn()}
+        createDraftRecord={baseWorkRecord}
+        references={REFERENCE_DATA}
+        saveContact={vi.fn()}
+        updateContact={vi.fn()}
+      />,
+    );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Log as work" })).toBeTruthy());
@@ -85,7 +102,15 @@ describe("Log as work — eligibility", () => {
   it("adds Log as work when the current candidate is changed to COMPLETED_WORK", async () => {
     const user = userEvent.setup();
     vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("ACTION")));
-    render(<VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+    render(
+      <VoiceIntelligence
+        openLog={vi.fn()}
+        createDraftRecord={baseWorkRecord}
+        references={REFERENCE_DATA}
+        saveContact={vi.fn()}
+        updateContact={vi.fn()}
+      />,
+    );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByLabelText("Candidate type")).toBeTruthy());
@@ -101,7 +126,15 @@ describe("Log as work — uses current edited state, and performs zero persisten
     const user = userEvent.setup();
     const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(jsonResponse(analysisWith("COMPLETED_WORK")));
     const openLog = vi.fn();
-    render(<VoiceIntelligence openLog={openLog} createDraftRecord={baseWorkRecord} />);
+    render(
+      <VoiceIntelligence
+        openLog={openLog}
+        createDraftRecord={baseWorkRecord}
+        references={REFERENCE_DATA}
+        saveContact={vi.fn()}
+        updateContact={vi.fn()}
+      />,
+    );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
     await user.click(screen.getByRole("button", { name: "Analyze transcript" }));
     await waitFor(() => expect(screen.getByRole("button", { name: "Log as work" })).toBeTruthy());

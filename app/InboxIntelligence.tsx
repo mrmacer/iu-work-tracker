@@ -3,16 +3,21 @@
 import { useState } from "react";
 import { MAX_EMAIL_LENGTH } from "../lib/anthropic-config";
 import type { AnalyzeEmailResult, AnalyzeEmailUsage } from "../lib/anthropic-email-analysis";
+import ContactMatchPanel, { resolveMatchedContacts } from "./ContactMatchPanel";
+import ContactFormModal, { emptyContactDraft } from "./ContactFormModal";
+import { matchContactCandidates, type ContactMatchDecision } from "../lib/contact-matching";
+import type { ContactResult } from "../lib/contact-provider";
 import { buildWorkRecordDraftFromAnalysis } from "../lib/inbox-intelligence-work-record";
 import {
   buildInboxIntelligenceRecord,
   computeInboxIntelligenceSummary,
+  resolveEmailAnalysisEntities,
   type EmailAnalysis,
   type InboxIntelligenceRecord,
   type InboxIntelligenceStatus,
 } from "../lib/inbox-intelligence-models";
 import type { InboxIntelligenceResult } from "../lib/inbox-intelligence-provider";
-import type { ReferenceData, WorkRecord } from "../lib/models";
+import type { Contact, ReferenceData, WorkRecord } from "../lib/models";
 
 type Phase = "paste" | "review" | "saved";
 
@@ -47,6 +52,8 @@ export default function InboxIntelligence({
   records,
   saveRecord,
   updateRecord,
+  saveContact,
+  updateContact,
 }: {
   references: ReferenceData;
   openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
@@ -54,6 +61,8 @@ export default function InboxIntelligence({
   records: InboxIntelligenceRecord[];
   saveRecord: (record: InboxIntelligenceRecord) => Promise<InboxIntelligenceResult<InboxIntelligenceRecord>>;
   updateRecord: (record: InboxIntelligenceRecord, expectedVersion: number) => Promise<InboxIntelligenceResult<InboxIntelligenceRecord>>;
+  saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
+  updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
 }) {
   const [phase, setPhase] = useState<Phase>("paste");
   const [rawEmail, setRawEmail] = useState("");
@@ -68,6 +77,12 @@ export default function InboxIntelligence({
   const [justSaved, setJustSaved] = useState<InboxIntelligenceRecord | null>(null);
   const [rowError, setRowError] = useState("");
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  // Patch 8D — People review state for the CURRENT (unsaved) analysis only. Keyed by the exact
+  // detected name string. Never persisted directly: at Save, only the accepted "matched"
+  // decisions become matchedContactIds — an "ignored" decision or an unreviewed person leaves
+  // no trace, exactly like Organization/Project matching leaves no "was this reviewed" record.
+  const [personDecisions, setPersonDecisions] = useState<Record<string, ContactMatchDecision>>({});
+  const [addPersonName, setAddPersonName] = useState<string | null>(null);
 
   const summary = computeInboxIntelligenceSummary(records);
 
@@ -103,6 +118,7 @@ export default function InboxIntelligence({
       setUsage(result.usage);
       setSourceExcerpt(excerpt(rawEmail));
       setAnalyzedAt(new Date().toISOString());
+      setPersonDecisions({});
       setPhase("review");
     } catch {
       setError("The AI service could not be reached. Check your connection and try again.");
@@ -121,14 +137,42 @@ export default function InboxIntelligence({
     setSourceExcerpt("");
     setJustSaved(null);
     setSaveError("");
+    setPersonDecisions({});
+    setAddPersonName(null);
     clearAll();
+  };
+
+  // Patch 8D — deterministic, zero-AI, zero-network. See lib/contact-matching.ts.
+  const decideMatch = (personName: string, contactAppId: string) =>
+    setPersonDecisions((current) => ({ ...current, [personName]: { type: "matched", contactAppId } }));
+  const decideIgnore = (personName: string) =>
+    setPersonDecisions((current) => ({ ...current, [personName]: { type: "ignored" } }));
+  const resetDecision = (personName: string) =>
+    setPersonDecisions((current) => {
+      const next = { ...current };
+      delete next[personName];
+      return next;
+    });
+  const onPersonAdded = (personName: string, savedContact: Contact) => {
+    decideMatch(personName, savedContact.appId);
+    setAddPersonName(null);
   };
 
   const saveToInbox = async () => {
     if (!analysis || saving) return; // one Save click, no re-entrancy — generates zero Anthropic calls
     setSaving(true);
     setSaveError("");
-    const record = buildInboxIntelligenceRecord(analysis, sourceExcerpt, references, analyzedAt);
+    // AI MAY PROPOSE. THE HUMAN DECIDES. Only explicit "Match Existing" / "Add Person" review
+    // decisions become matchedContactIds — never auto-resolved the way Organization/District/
+    // Project are inside buildInboxIntelligenceRecord() itself. See lib/contact-matching.ts.
+    const matchedContactIds = [
+      ...new Set(
+        Object.values(personDecisions)
+          .filter((decision): decision is { type: "matched"; contactAppId: string } => decision.type === "matched")
+          .map((decision) => decision.contactAppId),
+      ),
+    ];
+    const record = buildInboxIntelligenceRecord(analysis, sourceExcerpt, references, analyzedAt, matchedContactIds);
     const result = await saveRecord(record);
     setSaving(false);
     if (result.status !== "success") {
@@ -335,6 +379,33 @@ export default function InboxIntelligence({
               </label>
             </div>
 
+            {analysis.people.length > 0 && (
+              <fieldset>
+                <legend>People — possible Contact matches</legend>
+                <p className="muted-copy">
+                  AI detected these names. Deterministic matching only suggests who they might be — you decide. Nothing is linked until you choose.
+                </p>
+                {(() => {
+                  const entityMatches = resolveEmailAnalysisEntities(analysis, references);
+                  const organizationContext = [...entityMatches.organizationIds, ...entityMatches.districtIds];
+                  return analysis.people.map((personName) => (
+                    <ContactMatchPanel
+                      key={personName}
+                      personName={personName}
+                      candidates={matchContactCandidates(personName, references.contacts, { organizationIds: organizationContext })}
+                      decision={personDecisions[personName]}
+                      contacts={references.contacts}
+                      organizations={references.organizations}
+                      onMatch={(contactAppId) => decideMatch(personName, contactAppId)}
+                      onIgnore={() => decideIgnore(personName)}
+                      onReset={() => resetDecision(personName)}
+                      onAddPerson={() => setAddPersonName(personName)}
+                    />
+                  ));
+                })()}
+              </fieldset>
+            )}
+
             <fieldset>
               <legend>Suggested work record</legend>
               <label>
@@ -378,6 +449,18 @@ export default function InboxIntelligence({
             </button>
           </footer>
         </section>
+      )}
+
+      {addPersonName && (
+        <ContactFormModal
+          contact={{ ...emptyContactDraft(), displayName: addPersonName }}
+          contacts={references.contacts}
+          organizations={references.organizations}
+          onCancel={() => setAddPersonName(null)}
+          onSaved={(savedContact) => onPersonAdded(addPersonName, savedContact)}
+          saveContact={saveContact}
+          updateContact={updateContact}
+        />
       )}
 
       {phase === "saved" && justSaved && (
@@ -499,6 +582,10 @@ function InboxRow({
     : record.matchedOrganizationIds[0]
       ? references.organizations.find((org) => org.appId === record.matchedOrganizationIds[0])?.name
       : null;
+  // Patch 8D — read-only display of the human-reviewed Contact matches from Save time. There is
+  // no post-save re-review UI, matching the existing Organization/District/Project precedent
+  // above (also resolved once and shown read-only here, never re-editable from this list).
+  const matchedContacts = resolveMatchedContacts(record.matchedContactIds, references.contacts);
 
   return (
     <div className="record-row" style={{ cursor: "default", flexWrap: "wrap", minHeight: "auto", padding: "10px 4px" }}>
@@ -509,7 +596,8 @@ function InboxRow({
           {record.analysis.priority} priority · {record.analysis.actionItems.length} action item
           {record.analysis.actionItems.length === 1 ? "" : "s"}
           {record.analysis.followUp ? ` · ${record.analysis.followUp}` : ""}
-          {relatedProject ? ` · ${relatedProject}` : relatedOrg ? ` · ${relatedOrg}` : ""} · updated {lastModified(record)}
+          {relatedProject ? ` · ${relatedProject}` : relatedOrg ? ` · ${relatedOrg}` : ""}
+          {matchedContacts.length ? ` · ${matchedContacts.map((c) => c.displayName).join(", ")}` : ""} · updated {lastModified(record)}
         </small>
       </span>
       <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

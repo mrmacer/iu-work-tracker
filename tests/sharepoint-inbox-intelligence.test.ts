@@ -77,6 +77,22 @@ describe("Inbox Intelligence field mapping", () => {
     expect(mapped.metadata).toEqual({ providerId: "1", version: 1, createdAt: "2026-08-29T12:00:00Z", modifiedAt: "2026-08-29T12:00:00Z", syncState: "saved" });
   });
 
+  it("round-trips matchedContactIds through MatchedContactIdsJson (Patch 8D)", () => {
+    const record = testRecord({ matchedContactIds: ["contact-north-valley-lead", "contact-futureworks"] });
+    const fields = toSharePointFields(record, 1);
+    expect(JSON.parse(String(fields.MatchedContactIdsJson))).toEqual(["contact-north-valley-lead", "contact-futureworks"]);
+
+    const mapped = fromSharePointItem(graphItem(record, 1));
+    expect(mapped.matchedContactIds).toEqual(["contact-north-valley-lead", "contact-futureworks"]);
+  });
+
+  it("reads matchedContactIds as [] for an item saved before the MatchedContactIdsJson column existed, never a parse error", () => {
+    const item = graphItem(testRecord(), 1);
+    delete (item.fields as Record<string, unknown>).MatchedContactIdsJson;
+    expect(() => fromSharePointItem(item)).not.toThrow();
+    expect(fromSharePointItem(item).matchedContactIds).toEqual([]);
+  });
+
   it("rejects an unsupported SchemaVersion instead of silently coercing it", () => {
     const fields = toSharePointFields(testRecord(), 1);
     fields.SchemaVersion = 99;

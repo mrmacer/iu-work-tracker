@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import VoiceIntelligence from "../app/VoiceIntelligence";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
+import { REFERENCE_DATA } from "../lib/reference-data";
 
 afterEach(() => {
   cleanup();
@@ -27,7 +28,15 @@ function baseWorkRecord(): WorkRecord {
 }
 
 function renderVoice() {
-  return render(<VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} />);
+  return render(
+    <VoiceIntelligence
+      openLog={vi.fn()}
+      createDraftRecord={baseWorkRecord}
+      references={REFERENCE_DATA}
+      saveContact={vi.fn()}
+      updateContact={vi.fn()}
+    />,
+  );
 }
 
 const SUCCESS_RESULT: AnalyzeTranscriptResult = {

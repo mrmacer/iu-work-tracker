@@ -144,12 +144,27 @@ describe("buildInboxIntelligenceRecord", () => {
         "matchedOrganizationIds",
         "matchedDistrictIds",
         "matchedProjectIds",
+        "matchedContactIds",
         "status",
         "resolvedAt",
         "linkedWorkRecordAppId",
         "metadata",
       ].sort(),
     );
+  });
+
+  it("defaults matchedContactIds to [] when no reviewed Contact matches are passed (Patch 8D)", () => {
+    const record = buildInboxIntelligenceRecord(analysis(), "a short excerpt", REFERENCE_DATA, "2026-08-29T12:00:00.000Z");
+    expect(record.matchedContactIds).toEqual([]);
+  });
+
+  it("carries through explicit reviewed Contact matches, deduped, unlike matchedOrganizationIds/matchedProjectIds which are auto-resolved (Patch 8D)", () => {
+    const record = buildInboxIntelligenceRecord(analysis(), "a short excerpt", REFERENCE_DATA, "2026-08-29T12:00:00.000Z", [
+      "contact-north-valley-lead",
+      "contact-north-valley-lead",
+      "contact-futureworks",
+    ]);
+    expect(record.matchedContactIds).toEqual(["contact-north-valley-lead", "contact-futureworks"]);
   });
 
   it("resolves matched*Ids using the same exact-match rule as the Work Record mapping", () => {
