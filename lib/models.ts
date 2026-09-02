@@ -46,7 +46,26 @@ export type WorkRecord = {
   isSample: boolean;
 };
 
-export type Project = { appId: string; name: string; description: string; status: "active" | "planning" | "complete"; color: string };
+/**
+ * Patch 7 — Projects (previously reference/configuration data only, see docs/DATA_MODEL.md
+ * "Reference and configuration entities") gains an optional durable dimension. `startDate`,
+ * `targetDate`, `stemOrbit`, and `metadata` are all optional so the five existing seeded
+ * projects in lib/reference-data.ts remain valid Project values unchanged — they are simply
+ * never durable (no `metadata`) and never dated/STEM-flagged. A Project with `metadata`
+ * present was created/loaded through lib/project-provider.ts; one without it is a static
+ * seeded project. `"paused"` is new in Patch 7 — additive to the existing status vocabulary.
+ */
+export type Project = {
+  appId: string;
+  name: string;
+  description: string;
+  status: "planning" | "active" | "paused" | "complete";
+  color: string;
+  startDate?: string | null;
+  targetDate?: string | null;
+  stemOrbit?: boolean;
+  metadata?: ProviderMetadata;
+};
 export type Organization = { appId: string; name: string; type: "district" | "partner" | "iu" };
 export type Contact = { appId: string; displayName: string; role: string; organizationId: string | null };
 export type Category = { appId: string; name: string; group: "work-area" | "topic" };

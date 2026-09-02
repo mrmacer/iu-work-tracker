@@ -27,7 +27,16 @@ import {
   type MeetingRecordProvider,
   type MeetingRecordResult,
 } from "../lib/meeting-record-provider";
-import { WORK_RECORD_SCHEMA_VERSION, type ReferenceData, type WorkRecord } from "../lib/models";
+import { WORK_RECORD_SCHEMA_VERSION, type Project, type ReferenceData, type WorkRecord } from "../lib/models";
+import {
+  buildProjectDraft,
+  PROJECT_STATUSES,
+  selectProjectProvider,
+  validateProjectShape,
+  type ProjectProvider,
+  type ProjectResult,
+  type ProjectStatus,
+} from "../lib/project-provider";
 import { deriveReportingDays } from "../lib/reporting";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
@@ -110,7 +119,13 @@ export default function IUWorkTracker({
   dataProvider,
   inboxDataProvider,
   meetingDataProvider,
-}: { dataProvider?: DataProvider; inboxDataProvider?: InboxIntelligenceProvider; meetingDataProvider?: MeetingRecordProvider } = {}) {
+  projectDataProvider,
+}: {
+  dataProvider?: DataProvider;
+  inboxDataProvider?: InboxIntelligenceProvider;
+  meetingDataProvider?: MeetingRecordProvider;
+  projectDataProvider?: ProjectProvider;
+} = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
   const [references, setReferences] = useState<ReferenceData | null>(null);
@@ -191,6 +206,59 @@ export default function IUWorkTracker({
     }
     return result;
   };
+  const projectProvider = useRef<ProjectProvider | null>(projectDataProvider ?? null);
+  const [projectRecords, setProjectRecords] = useState<Project[]>([]);
+  const [projectLoadFailed, setProjectLoadFailed] = useState(false);
+  useEffect(() => {
+    // Independent of every other load: a failure here never affects Work Records, Inbox
+    // Intelligence, or Meeting Records, and vice versa. Read-only list() call — zero Anthropic
+    // calls, matching docs/AI_HANDOFF.md "Durable Projects (Patch 7)" cost discipline.
+    let live = true;
+    (async () => {
+      if (!projectProvider.current) {
+        const selected = await selectProjectProvider();
+        projectProvider.current = selected.provider;
+      }
+      const result = await projectProvider.current.list();
+      if (!live) return;
+      if (result.status === "success") setProjectRecords(result.value);
+      else setProjectLoadFailed(true);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  const saveProject = async (project: Project): Promise<ProjectResult<Project>> => {
+    const active = projectProvider.current;
+    if (!active) return { status: "network_error", message: "The project store is still starting up. Try again in a moment." };
+    const result = await active.create(project);
+    if (result.status === "success") {
+      setProjectRecords((current) => [result.value, ...current.filter((item) => item.appId !== result.value.appId)]);
+    }
+    return result;
+  };
+  const updateProject = async (project: Project, expectedVersion: number): Promise<ProjectResult<Project>> => {
+    const active = projectProvider.current;
+    if (!active) return { status: "network_error", message: "The project store is still starting up. Try again in a moment." };
+    const result = await active.update(project, expectedVersion);
+    if (result.status === "success") {
+      setProjectRecords((current) => current.map((item) => (item.appId === result.value.appId ? result.value : item)));
+    }
+    return result;
+  };
+  const projectRecordsRef = useRef<Project[]>(projectRecords);
+  useEffect(() => {
+    // Keeps the Work Record DataProvider's internal reference-project set in sync with the
+    // currently-known durable Projects (see lib/data-provider.ts "setDurableProjects"), so
+    // createWorkRecord/updateWorkRecord validation never rejects a project the UI itself offers
+    // as selectable. Also updates the ref the Work Record load effect above reads from — an
+    // effect (not render) access, so neither ordering between the two provider-load effects can
+    // leave the durable-project set stale.
+    projectRecordsRef.current = projectRecords;
+    provider.current?.setDurableProjects(projectRecords);
+  }, [projectRecords]);
+  const allProjects: Project[] = references ? [...references.projects, ...projectRecords] : projectRecords;
+  const effectiveReferences: ReferenceData | null = references ? { ...references, projects: allProjects } : null;
   const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
     const active = inboxProvider.current;
     if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
@@ -233,6 +301,11 @@ export default function IUWorkTracker({
           provider.current = selected.provider;
           kind = selected.kind;
         }
+        // Patch 7: sync whatever durable Projects are already known (via the ref, not the
+        // possibly-stale `projectRecords` closure — see the projectRecordsRef effect below) the
+        // moment this provider becomes available, so createWorkRecord/updateWorkRecord
+        // validation is correct regardless of which provider-load effect resolves first.
+        provider.current.setDurableProjects(projectRecordsRef.current);
         await loadFrom(provider.current);
       } catch {
         // Selecting or loading from the active provider failed (including a SharePoint
@@ -360,7 +433,7 @@ export default function IUWorkTracker({
               with Microsoft (top right) to connect SharePoint and save durably.
             </div>
           )}
-          {loading || !references ? (
+          {loading || !effectiveReferences ? (
             <div className="loading-card">Preparing your workspace…</div>
           ) : view === "home" ? (
             <Home
@@ -370,7 +443,7 @@ export default function IUWorkTracker({
               followups={followups}
               openLog={openLog}
               setView={setView}
-              references={references}
+              references={effectiveReferences}
               inboxSummary={computeInboxIntelligenceSummary(inboxRecords)}
               needsAttentionCount={filterNeedsAttention(inboxRecords).length}
               needsAttentionItems={selectNeedsAttention(inboxRecords)}
@@ -383,7 +456,7 @@ export default function IUWorkTracker({
               total={totalToday}
               followups={followups}
               openLog={openLog}
-              references={references}
+              references={effectiveReferences}
             />
           ) : view === "history" ? (
             <History
@@ -391,15 +464,22 @@ export default function IUWorkTracker({
               search={search}
               setSearch={setSearch}
               openLog={openLog}
-              references={references}
+              references={effectiveReferences}
             />
           ) : view === "projects" ? (
-            <Projects records={records} setView={setView} projects={references.projects} />
+            <Projects
+              records={records}
+              setView={setView}
+              projects={allProjects}
+              loadFailed={projectLoadFailed}
+              saveProject={saveProject}
+              updateProject={updateProject}
+            />
           ) : view === "orbit" ? (
-            <Orbit records={records} references={references} />
+            <Orbit records={records} references={effectiveReferences} />
           ) : view === "inbox" ? (
             <InboxIntelligence
-              references={references}
+              references={effectiveReferences}
               openLog={openLog}
               createDraftRecord={emptyRecord}
               records={inboxRecords}
@@ -429,7 +509,7 @@ export default function IUWorkTracker({
         <span>Log it once. Use it everywhere.</span>
       </footer>
     </main>
-      {logging && references && (
+      {logging && effectiveReferences && (
         <LogWizard
           record={draft}
           step={step}
@@ -440,7 +520,7 @@ export default function IUWorkTracker({
           save={save}
           saving={saving}
           error={saveError}
-          references={references}
+          references={effectiveReferences}
           returnFocusRef={opener}
         />
       )}
@@ -865,15 +945,41 @@ function History({
     </div>
   );
 }
+// Cycled deterministically for new durable projects (see globals.css .project-mark.<color>) —
+// the create form deliberately has no color picker (not part of the Patch 7 spec), so every
+// new project keeps the exact same visual card design as the five seeded ones.
+const PROJECT_COLORS = ["blue", "coral", "lime", "purple", "yellow"] as const;
+
+function emptyProjectDraft(existingCount: number): Project {
+  return buildProjectDraft({
+    appId: crypto.randomUUID(),
+    name: "",
+    description: "",
+    status: "planning",
+    color: PROJECT_COLORS[existingCount % PROJECT_COLORS.length],
+    startDate: null,
+    targetDate: null,
+    stemOrbit: false,
+  });
+}
+
 function Projects({
   records,
   setView,
   projects,
+  loadFailed,
+  saveProject,
+  updateProject,
 }: {
   records: WorkRecord[];
   setView: (v: View) => void;
-  projects: ReferenceData["projects"];
+  projects: Project[];
+  loadFailed: boolean;
+  saveProject: (project: Project) => Promise<ProjectResult<Project>>;
+  updateProject: (project: Project, expectedVersion: number) => Promise<ProjectResult<Project>>;
 }) {
+  const [modalProject, setModalProject] = useState<Project | null>(null);
+
   return (
     <div className="screen-inner">
       <PageHeading
@@ -881,6 +987,7 @@ function Projects({
         title="Projects"
         copy="See the activity, time, and outcomes accumulating around each initiative."
       />
+      {loadFailed && <p className="muted-copy">Projects could not be fully loaded. Try reloading the page.</p>}
       <div className="project-grid">
         {projects.map((project) => {
           const related = records.filter((record) =>
@@ -890,6 +997,12 @@ function Projects({
             (sum, record) => sum + record.durationMinutes,
             0,
           );
+          // Only a durable project (created/loaded through the Project provider — see
+          // docs/AI_HANDOFF.md "Durable Projects (Patch 7)") is editable. The five seeded
+          // reference-data projects have no `metadata` and remain read-only in V1, since they
+          // were never approved for migration into the durable store — see the Patch 7
+          // approval gate's "Seeded-project migration strategy."
+          const isDurable = Boolean(project.metadata);
           return (
             <article className="project-card" key={project.appId}>
               <span className={`project-mark ${project.color}`} />
@@ -906,28 +1019,172 @@ function Projects({
                   <b>{hours(mins)}</b> invested
                 </span>
               </div>
-              <button onClick={() => setView("history")}>
-                View connected work →
-              </button>
+              <div className="project-card-actions">
+                <button onClick={() => setView("history")}>
+                  View connected work →
+                </button>
+                {isDurable && (
+                  <button type="button" className="ghost-button" onClick={() => setModalProject(project)}>
+                    Edit
+                  </button>
+                )}
+              </div>
             </article>
           );
         })}
+        <button type="button" className="planned-note" aria-label="Create Project" onClick={() => setModalProject(emptyProjectDraft(projects.length))}>
+          <span>＋</span>
+          <div>
+            <strong>Create Project</strong>
+            <p>It becomes selectable in Log Work immediately, with totals derived from Work Records.</p>
+          </div>
+        </button>
       </div>
-      <div className="planned-note">
-        <span>＋</span>
-        <div>
-          <strong>
-            Project creation is planned for the next capability slice.
-          </strong>
-          <p>
-            V1 proves the reusable project relationship and calculates totals
-            from universal Work Records.
-          </p>
-        </div>
-      </div>
+      {modalProject && (
+        <ProjectFormModal
+          project={modalProject}
+          onCancel={() => setModalProject(null)}
+          onSaved={() => setModalProject(null)}
+          saveProject={saveProject}
+          updateProject={updateProject}
+        />
+      )}
     </div>
   );
 }
+
+/**
+ * A single compact overlay handles both Create and Edit — see docs/AI_HANDOFF.md "Durable
+ * Projects (Patch 7)". Create vs. update is decided the same way every other durable resource
+ * in this codebase decides it: `project.metadata.version > 0` means the project already has a
+ * durable identity, so submitting routes through updateProject(); otherwise saveProject().
+ * Updating a project never touches its connected Work Records — this component only ever
+ * calls the Project provider.
+ */
+function ProjectFormModal({
+  project,
+  onCancel,
+  onSaved,
+  saveProject,
+  updateProject,
+}: {
+  project: Project;
+  onCancel: () => void;
+  onSaved: () => void;
+  saveProject: (project: Project) => Promise<ProjectResult<Project>>;
+  updateProject: (project: Project, expectedVersion: number) => Promise<ProjectResult<Project>>;
+}) {
+  const [draft, setDraft] = useState<Project>(project);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const nameRef = useRef<HTMLInputElement>(null);
+  const isEditing = (draft.metadata?.version ?? 0) > 0;
+
+  useEffect(() => {
+    nameRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const patch = (change: Partial<Project>) => setDraft((current) => ({ ...current, ...change }));
+
+  const submit = async () => {
+    if (saving) return;
+    const shapeIssues = validateProjectShape(draft);
+    if (shapeIssues.length) {
+      setError(shapeIssues[0].message);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    const result = isEditing ? await updateProject(draft, draft.metadata!.version) : await saveProject(draft);
+    setSaving(false);
+    if (result.status !== "success") {
+      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the project and try again.") : result.message);
+      return;
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title">
+        <header className="log-header">
+          <h2 id="project-modal-title">{isEditing ? "Edit Project" : "Create Project"}</h2>
+          <button onClick={onCancel} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="log-content">
+          <div className="form-stack">
+            <label>
+              <span>
+                Project name <b>*</b>
+              </span>
+              <input ref={nameRef} value={draft.name} onChange={(event) => patch({ name: event.target.value })} placeholder="e.g. STEM Ecosystem" />
+            </label>
+            <label>
+              <span>Description</span>
+              <textarea value={draft.description} onChange={(event) => patch({ description: event.target.value })} placeholder="A sentence is enough." rows={2} />
+            </label>
+            <label>
+              <span>Status</span>
+              <select value={draft.status} onChange={(event) => patch({ status: event.target.value as ProjectStatus })}>
+                {PROJECT_STATUSES.map((status) => (
+                  <option key={status} value={status}>
+                    {status[0].toUpperCase() + status.slice(1)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <div className="form-two">
+              <label>
+                <span>Start date</span>
+                <input type="date" value={draft.startDate ?? ""} onChange={(event) => patch({ startDate: event.target.value || null })} />
+              </label>
+              <label>
+                <span>Target date</span>
+                <input type="date" value={draft.targetDate ?? ""} onChange={(event) => patch({ targetDate: event.target.value || null })} />
+              </label>
+            </div>
+            <div className="toggle-line">
+              <input
+                aria-label="STEM / ORBIT connection"
+                type="checkbox"
+                checked={draft.stemOrbit ?? false}
+                onChange={(event) => patch({ stemOrbit: event.target.checked })}
+              />
+              <span>
+                <strong>STEM / ORBIT connection</strong>
+                <small>Optional — does not classify any Work Record automatically.</small>
+              </span>
+            </div>
+          </div>
+        </div>
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        )}
+        <footer className="log-footer">
+          <button className="ghost-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.name.trim()}>
+            {saving ? "Saving…" : isEditing ? "Save Changes" : "Create Project"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
 function Orbit({ records, references }: { records: WorkRecord[]; references: ReferenceData }) {
   const reportable = records.filter((record) => record.orbit.reportable);
   const poc = reportable.reduce(
@@ -1258,18 +1515,25 @@ function LogWizard({
                   Project <small>optional</small>
                 </legend>
                 <div className="chip-grid">
-                  {references.projects.map((item) => (
-                    <button
-                      type="button"
-                      key={item.appId}
-                      className={
-                        record.projectIds.includes(item.appId) ? "selected" : ""
-                      }
-                      onClick={() => toggle("projectIds", item.appId)}
-                    >
-                      {item.name}
-                    </button>
-                  ))}
+                  {references.projects
+                    // A completed project remains a valid, historical connection (see
+                    // docs/AI_HANDOFF.md "Durable Projects (Patch 7)" — Completed-project
+                    // behavior), but is not offered as a normal default choice for new work.
+                    // An already-connected complete project on the record being edited stays
+                    // visible so an existing relationship is never hidden.
+                    .filter((item) => item.status !== "complete" || record.projectIds.includes(item.appId))
+                    .map((item) => (
+                      <button
+                        type="button"
+                        key={item.appId}
+                        className={
+                          record.projectIds.includes(item.appId) ? "selected" : ""
+                        }
+                        onClick={() => toggle("projectIds", item.appId)}
+                      >
+                        {item.name}
+                      </button>
+                    ))}
                 </div>
               </fieldset>
               <details className="advanced-details">

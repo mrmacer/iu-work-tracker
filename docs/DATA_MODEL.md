@@ -46,7 +46,7 @@ The V1 regional development sample previously used `org-regional`. Migration `dr
 
 ## Reference and configuration entities
 
-- `Project`: stable ID, name, description, status, and display color.
+- `Project`: stable ID, name, description, status (`planning`/`active`/`paused`/`complete`), and display color — optionally durable as of Patch 7 (see below).
 - `Organization`: stable ID, canonical name, and real type (`district`, `partner`, or `iu`).
 - `Contact`: stable ID, display name, role, and optional organization relationship. V1.1 only supplies sample references; it is not a CRM.
 - `Category`: stable ID, name, and category group.
@@ -60,7 +60,7 @@ All are requested by the frontend through `DataProvider` methods. The seed array
 
 `lib/validation.ts` is shared by provider and API paths. It validates required strings, canonical IDs, arrays, reach, duration, engagement scope, schema version, and nested ORBIT invariants. A create receives server timestamps and version `1`. An update supplies `expectedVersion`; successful updates increment the version, preserve `createdAt`, and receive a server-owned `modifiedAt`.
 
-## MeetingRecord (Patch 6B — durable, SharePoint list not yet provisioned)
+## MeetingRecord (Patch 6B — durable, SharePoint list provisioned and live)
 
 A second durable resource, independent of `WorkRecord`, following the identical `DataProvider`-style boundary and optimistic-concurrency discipline described above. See `docs/AI_HANDOFF.md` "Meeting Notes durability (Patch 6B)" for the full design rationale.
 
@@ -77,3 +77,21 @@ A second durable resource, independent of `WorkRecord`, following the identical 
 Relationships intentionally NOT present: no `projectIds`/`organizationIds`/`contactIds`/`categoryIds`, no district/people entity resolution on `attendeesText`. No delete operation exists for this resource in Patch 6B — `MeetingRecordProvider` exposes `list`/`create`/`update` only.
 
 `MeetingRecord` and `WorkRecord` persistence are deliberately uncoupled: saving a meeting never creates or updates a `WorkRecord`, and the "Log as work" handoff (`buildWorkRecordDraftFromMeetingCandidate()`) never creates or updates a `MeetingRecord`.
+
+## Durable Project (Patch 7 / 7B — GREEN, live-verified against real DEV SharePoint, uncommitted)
+
+Extends the existing `Project` reference-data type in place (`lib/models.ts`) rather than introducing a parallel model — see `docs/AI_HANDOFF.md` "Durable Projects (Patch 7 / 7B)" for the full design rationale. Durably persisted to the existing `IU_Projects` SharePoint list (extended in place, not replaced) via `NEXT_PUBLIC_SHAREPOINT_IU_PROJECTS_LIST_ID` — the single authoritative Project-list configuration; no second list or env var exists.
+
+| Concern | Runtime fields and rules |
+| --- | --- |
+| Identity | `appId`, `name` |
+| Description | `description` |
+| Status | `status`: `planning`, `active`, `paused` (new in Patch 7), or `complete` — stored in `IU_Projects`'s existing `ProjectStatus` Choice column (kept as Choice, never converted to text; `"paused"` added as a fourth allowed value) |
+| Visual | `color` — one of the five existing `project-mark` tokens; assigned deterministically on create, no color picker in the UI |
+| Timeline | `startDate`, `targetDate` — both optional, `null` when unset |
+| STEM/ORBIT | `stemOrbit` — optional boolean; a manual flag only, never AI-derived, never auto-classifying any Work Record |
+| Persistence | optional nested `metadata` (`ProviderMetadata`) — **present only for a durable project** (created/loaded through `ProjectProvider`); **absent for the five seeded reference-data projects**, which is exactly how the UI decides whether to offer "Edit" |
+
+No record count or duration field exists on `Project` — the Projects screen always derives both by filtering `WorkRecord[]` on `projectIds.includes(project.appId)` and summing `durationMinutes`, exactly as it did before this patch. No delete operation exists for this resource — `ProjectProvider` exposes `list`/`create`/`update` only. The five seeded projects (`project-steels`, `project-ai`, `project-keystone`, `project-ecosystem`, `project-makerspace`) are not migrated into the durable store in this patch and remain exactly as they were.
+
+`DataProvider.setDurableProjects()` (`lib/data-provider.ts`) is the one deliberate coupling point: it keeps `createWorkRecord`/`updateWorkRecord`'s `projectIds` validation (`lib/validation.ts`) aware of durable projects the UI offers, without `WorkRecord` and `Project` persistence otherwise depending on each other in any way — creating or editing a Project never creates or updates a `WorkRecord`, and logging work never creates or updates a `Project`.

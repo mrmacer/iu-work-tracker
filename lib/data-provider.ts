@@ -38,10 +38,23 @@ export interface DataProvider {
   getDeliverables(): Promise<Deliverable[]>;
   getReportingConfig(): Promise<ReportingConfig>;
   getSystemSettings(): Promise<SystemSettings>;
+  /**
+   * Patch 7: durable Projects (lib/project-provider.ts) load asynchronously through their own
+   * provider, independent of this one. createWorkRecord/updateWorkRecord validate projectIds
+   * against `this.references.projects` (lib/validation.ts) — without this, a Work Record
+   * referencing a newly-created durable project would fail validation even though the UI
+   * offers it as selectable. The app calls this every render with the current durable-project
+   * list so validation always sees the merged (seeded + durable) set; it never fetches or
+   * persists anything itself.
+   */
+  setDurableProjects(projects: Project[]): void;
 }
 
 abstract class ReferenceProvider {
   protected references: ReferenceData = REFERENCE_DATA;
+  setDurableProjects(durableProjects: Project[]): void {
+    this.references = { ...this.references, projects: [...REFERENCE_DATA.projects, ...durableProjects] };
+  }
   async getProjects() { return structuredClone(this.references.projects); }
   async getOrganizations() { return structuredClone(this.references.organizations); }
   async getContacts() { return structuredClone(this.references.contacts); }
