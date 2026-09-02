@@ -335,6 +335,22 @@ Promotes the existing static `Contact` reference-data concept into a durable, us
 
 ---
 
+## Contact Detail + Connected Work (Patch 8C) — GREEN, live-verified against real DEV SharePoint
+
+Turns the Patch 8B Contacts directory into a relationship-memory view: opening a Contact answers "what work connects to this person" — entirely derived from records already stored elsewhere. No schema change, no new SharePoint columns, no new Graph requests, no AI.
+
+- **The relationship stays exactly `Contact.appId → WorkRecord.contactIds → WorkRecord.projectIds → Project`** — no `Contact.projectIds`, no `Project.contactIds`, no direct persisted Contact↔Project relationship. See `docs/DATA_MODEL.md` "Contact connected work (Patch 8C)" for the full derivation contract.
+- **`lib/contact-relationships.ts`** — a new, self-contained pure derivation module (no I/O, no AI), mirroring `lib/inbox-action-center.ts`'s role for the Home Action Center. `buildContactRelationshipSummary(workRecords, projects, contactAppId)` returns `connectedWorkRecords`, `recentWorkRecords` (5 most recent), `connectedProjects`, `totalMinutes`, `workRecordCount`, and `lastInteractionDate` — computed fresh on every render from arrays the screen already has, never persisted anywhere.
+- **Last Interaction uses `WorkRecord.activityDate`** (the same business-date field and sort direction History already uses) — deliberately never `ProviderMetadata.createdAt`/`modifiedAt` (SharePoint Created/Modified describe persistence timing, not interaction timing). A dedicated test proves this by setting a decoy record's metadata timestamps to the year 2099 and confirming they are never read.
+- **Contact Detail UX**: Contacts directory cards are now openable (the card's title block is a real `<button>`; the sibling "Edit" button stays a separate control so click targets never overlap or nest) — clicking one opens `ContactDetail` as an internal state toggle (`openContactId`) inside the existing `Contacts` screen component, not a new top-level `View` or URL route. Information hierarchy: identity header (name, resolved Organization via `contact.organizationId`, status, role, email) → Relationship Snapshot (Last Interaction, Connected Time, Work Record count) → Connected Projects (chips) → Recent Work (up to 5 rows, newest first, each opening the existing Log Work edit dialog for that record — no new Work Record CRUD surface) → Notes (existing `contact.notes` field, read-only here; editing stays through the existing Edit Contact modal). "← Back to Contacts" returns to the directory. Works identically for durable and seed Contacts (Edit is offered only when `contact.metadata` is present, same rule as the directory card) and for archived Contacts when explicitly opened.
+- **Empty states, never a hidden screen**: "No recorded interaction yet.", "No connected projects yet.", "No work has been logged with this contact yet.", "0m" connected time — a Contact with zero connected Work Records renders calmly, never crashes, never fabricates a date.
+- **Zero AI, zero new persistence, zero N+1 fetching**: no AI summary/relevance scoring anywhere in Contact Detail; no `Waiting On`/follow-up/task system (deferred to Patch 8D+, once Inbox/Meeting Contact links exist); derivation runs entirely over the Work Records and Projects the app already loaded — no Contact-specific Graph requests, no background refresh loop, no new cache layer.
+- **Test coverage**: `tests/contact-relationships.test.ts` (pure derivation — exact-appId-only matching, never inferring from name/email/org/free-text, newest-first sort, project union + dedup + graceful-skip-unresolved, duration sum, last-interaction using business date only, unrelated-newer-record isolation, clean empty summary, recent-work cap vs. true count) and `tests/contact-detail-ui.test.tsx` (opening detail, organization resolution, status display, Relationship Snapshot/Connected Projects/Recent Work rendering, clicking a Recent Work row into the existing Log Work dialog, Notes rendering, empty states, seed-Contact and archived-Contact detail access, zero-fetch boundary, and static guardrails confirming `Contact` still has no `projectIds` and `Project` still has no `contactIds`).
+
+**Status: GREEN, live-verified.**
+
+---
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:

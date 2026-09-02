@@ -38,6 +38,7 @@ import {
   type ContactProvider,
   type ContactResult,
 } from "../lib/contact-provider";
+import { buildContactRelationshipSummary } from "../lib/contact-relationships";
 import {
   buildProjectDraft,
   PROJECT_STATUSES,
@@ -544,9 +545,12 @@ export default function IUWorkTracker({
             <Contacts
               contacts={allContacts}
               organizations={effectiveReferences.organizations}
+              projects={allProjects}
+              records={records}
               loadFailed={contactLoadFailed}
               saveContact={saveContact}
               updateContact={updateContact}
+              openLog={openLog}
             />
           ) : view === "orbit" ? (
             <Orbit records={records} references={effectiveReferences} />
@@ -1279,29 +1283,53 @@ function emptyContactDraft(): Contact {
 }
 
 /**
- * Patch 8B — Durable Contacts. Deliberately small: identity/basic metadata only. No connected
- * work, no timeline, no Last Interaction, no Waiting On — those are Patch 8C. See
- * docs/AI_HANDOFF.md "Durable Contacts (Patch 8B)".
+ * Patch 8B — Durable Contacts, identity/basic metadata. Patch 8C adds Contact Detail: opening a
+ * card derives a relationship summary from records already stored elsewhere (WorkRecord.
+ * contactIds → WorkRecord.projectIds → Project) — see lib/contact-relationships.ts and
+ * docs/AI_HANDOFF.md "Contact connected work (Patch 8C)". No relationship data is duplicated
+ * onto Contact.
  */
 function Contacts({
   contacts,
   organizations,
+  projects,
+  records,
   loadFailed,
   saveContact,
   updateContact,
+  openLog,
 }: {
   contacts: Contact[];
   organizations: Organization[];
+  projects: Project[];
+  records: WorkRecord[];
   loadFailed: boolean;
   saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
   updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
+  openLog: (record?: WorkRecord) => void;
 }) {
   const [search, setSearch] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [modalContact, setModalContact] = useState<Contact | null>(null);
+  const [openContactId, setOpenContactId] = useState<string | null>(null);
 
   const organizationName = (id: string | null) =>
     id ? (organizations.find((org) => org.appId === id)?.name ?? "Unknown organization") : "";
+
+  const openContact = openContactId ? contacts.find((contact) => contact.appId === openContactId) : undefined;
+  if (openContact) {
+    return (
+      <ContactDetail
+        contact={openContact}
+        organizationName={organizationName(openContact.organizationId)}
+        records={records}
+        projects={projects}
+        onBack={() => setOpenContactId(null)}
+        onEdit={() => setModalContact(openContact)}
+        openLog={openLog}
+      />
+    );
+  }
 
   // Case-insensitive substring match only — the same philosophy already used for Work
   // History's search (see the `History` component above). No fuzzy/semantic matching.
@@ -1338,17 +1366,22 @@ function Contacts({
         {filtered.map((contact) => {
           // Only a durable contact (created/loaded through the Contact provider) is editable.
           // The three seeded reference-data contacts have no `metadata` and remain read-only
-          // in V1 — mirrors the Project precedent exactly.
+          // in V1 — mirrors the Project precedent exactly. Detail is available for both.
           const isDurable = Boolean(contact.metadata);
           const subtitle = [contact.role, organizationName(contact.organizationId)].filter(Boolean).join(" · ");
           return (
             <article className="project-card" key={contact.appId}>
-              <div className="project-title">
+              <button
+                type="button"
+                className="project-title"
+                onClick={() => setOpenContactId(contact.appId)}
+                style={{ all: "unset", cursor: "pointer", display: "block", width: "100%" }}
+              >
                 <span className="status-chip">{CONTACT_STATUS_LABELS[contact.status]}</span>
                 <h2>{contact.displayName}</h2>
                 <p>{subtitle || "No role or organization on file"}</p>
                 {contact.email && <p className="muted-copy">{contact.email}</p>}
-              </div>
+              </button>
               {isDurable && (
                 <div className="project-card-actions">
                   <span />
@@ -1379,6 +1412,119 @@ function Contacts({
           saveContact={saveContact}
           updateContact={updateContact}
         />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Patch 8C — every value below the identity header is derived at render time via
+ * buildContactRelationshipSummary() (lib/contact-relationships.ts). Nothing here is persisted
+ * on Contact — reopening this screen recomputes it fresh from the currently-loaded Work
+ * Records and Projects, exactly like the Projects screen's own derived totals.
+ */
+function ContactDetail({
+  contact,
+  organizationName,
+  records,
+  projects,
+  onBack,
+  onEdit,
+  openLog,
+}: {
+  contact: Contact;
+  organizationName: string;
+  records: WorkRecord[];
+  projects: Project[];
+  onBack: () => void;
+  onEdit: () => void;
+  openLog: (record?: WorkRecord) => void;
+}) {
+  const summary = buildContactRelationshipSummary(records, projects, contact.appId);
+  const isDurable = Boolean(contact.metadata);
+  const subtitle = [CONTACT_STATUS_LABELS[contact.status], contact.role].filter(Boolean).join(" · ");
+
+  return (
+    <div className="screen-inner">
+      <button type="button" className="ghost-button" onClick={onBack} style={{ marginLeft: 0, marginBottom: 13 }}>
+        ← Back to Contacts
+      </button>
+      <div className="page-heading">
+        <div>
+          <p className="eyebrow">{organizationName || "No organization on file"}</p>
+          <h1>{contact.displayName}</h1>
+          <p>{subtitle}</p>
+          {contact.email && <p className="muted-copy">{contact.email}</p>}
+        </div>
+        {isDurable && (
+          <button type="button" className="primary-action" onClick={onEdit}>
+            Edit Contact
+          </button>
+        )}
+      </div>
+
+      <section className="panel">
+        <p className="eyebrow">Relationship snapshot</p>
+        <div className="project-metrics" style={{ gap: 28, paddingTop: 0, borderTop: "none" }}>
+          <span>
+            <b>{summary.lastInteractionDate ? niceDate(summary.lastInteractionDate) : "—"}</b>
+            Last interaction
+          </span>
+          <span>
+            <b>{hours(summary.totalMinutes)}</b>
+            Connected work
+          </span>
+          <span>
+            <b>{summary.workRecordCount}</b>
+            Work record{summary.workRecordCount === 1 ? "" : "s"}
+          </span>
+        </div>
+        {summary.workRecordCount === 0 && <p className="muted-copy">No recorded interaction yet.</p>}
+      </section>
+
+      <section className="panel">
+        <p className="eyebrow">Connected projects</p>
+        {summary.connectedProjects.length ? (
+          <div className="chip-grid">
+            {summary.connectedProjects.map((project) => (
+              <span key={project.appId} className="status-chip" style={{ fontSize: 9, padding: "6px 10px" }}>
+                {project.name}
+              </span>
+            ))}
+          </div>
+        ) : (
+          <p className="muted-copy">No connected projects yet.</p>
+        )}
+      </section>
+
+      <section className="panel">
+        <p className="eyebrow">Recent work</p>
+        {summary.recentWorkRecords.length ? (
+          <div>
+            {summary.recentWorkRecords.map((record) => (
+              <button className="record-row" key={record.appId} onClick={() => openLog(record)}>
+                <span className={`record-dot ${record.orbit.reportable ? "orbit" : "iu"}`} />
+                <span>
+                  <strong>{record.title}</strong>
+                  <small>
+                    {niceDate(record.activityDate)} · {record.activityType}
+                  </small>
+                </span>
+                <b>{hours(record.durationMinutes)}</b>
+                <i>→</i>
+              </button>
+            ))}
+          </div>
+        ) : (
+          <p className="muted-copy">No work has been logged with this contact yet.</p>
+        )}
+      </section>
+
+      {contact.notes && (
+        <section className="panel">
+          <p className="eyebrow">Notes</p>
+          <p>{contact.notes}</p>
+        </section>
       )}
     </div>
   );
