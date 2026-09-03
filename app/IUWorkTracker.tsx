@@ -31,6 +31,16 @@ import { WORK_RECORD_SCHEMA_VERSION, type Contact, type Organization, type Proje
 import { selectContactProvider, type ContactProvider, type ContactResult } from "../lib/contact-provider";
 import { buildContactRelationshipSummary } from "../lib/contact-relationships";
 import {
+  buildOrganizationDraft,
+  normalizeOrganizationName,
+  ORGANIZATION_TYPES,
+  selectOrganizationProvider,
+  validateOrganizationShape,
+  type OrganizationProvider,
+  type OrganizationResult,
+  type OrganizationTypeValue,
+} from "../lib/organization-provider";
+import {
   buildProjectDraft,
   PROJECT_STATUSES,
   selectProjectProvider,
@@ -46,13 +56,14 @@ import InboxIntelligence from "./InboxIntelligence";
 import MeetingNotes from "./MeetingNotes";
 import VoiceIntelligence from "./VoiceIntelligence";
 
-type View = "home" | "today" | "history" | "projects" | "contacts" | "orbit" | "inbox" | "voice" | "meeting";
+type View = "home" | "today" | "history" | "projects" | "contacts" | "organizations" | "orbit" | "inbox" | "voice" | "meeting";
 const navItems: [View, string, string][] = [
   ["home", "⌂", "Home"],
   ["today", "◷", "Today"],
   ["history", "≡", "History"],
   ["projects", "▤", "Projects"],
   ["contacts", "☺", "Contacts"],
+  ["organizations", "🏛", "Organizations"],
   ["orbit", "◎", "STEM / ORBIT"],
   ["inbox", "✉", "Inbox Intelligence"],
   ["voice", "🎙", "Voice Intelligence"],
@@ -125,12 +136,14 @@ export default function IUWorkTracker({
   meetingDataProvider,
   projectDataProvider,
   contactDataProvider,
+  organizationDataProvider,
 }: {
   dataProvider?: DataProvider;
   inboxDataProvider?: InboxIntelligenceProvider;
   meetingDataProvider?: MeetingRecordProvider;
   projectDataProvider?: ProjectProvider;
   contactDataProvider?: ContactProvider;
+  organizationDataProvider?: OrganizationProvider;
 } = {}) {
   const [view, setView] = useState<View>("home");
   const [records, setRecords] = useState<WorkRecord[]>([]);
@@ -312,9 +325,62 @@ export default function IUWorkTracker({
     contactRecordsRef.current = contactRecords;
     provider.current?.setDurableContacts(contactRecords);
   }, [contactRecords]);
+  const organizationProvider = useRef<OrganizationProvider | null>(organizationDataProvider ?? null);
+  const [organizationRecords, setOrganizationRecords] = useState<Organization[]>([]);
+  const [organizationLoadFailed, setOrganizationLoadFailed] = useState(false);
+  useEffect(() => {
+    // Independent of every other load: a failure here never affects Work Records, Inbox
+    // Intelligence, Meeting Records, Projects, or Contacts, and vice versa. Read-only list()
+    // call — zero Anthropic calls, matching docs/AI_HANDOFF.md "Durable Organizations (Patch
+    // 8E)" cost discipline.
+    let live = true;
+    (async () => {
+      if (!organizationProvider.current) {
+        const selected = await selectOrganizationProvider();
+        organizationProvider.current = selected.provider;
+      }
+      const result = await organizationProvider.current.list();
+      if (!live) return;
+      if (result.status === "success") setOrganizationRecords(result.value);
+      else setOrganizationLoadFailed(true);
+    })();
+    return () => {
+      live = false;
+    };
+  }, []);
+  const saveOrganization = async (organization: Organization): Promise<OrganizationResult<Organization>> => {
+    const active = organizationProvider.current;
+    if (!active) return { status: "network_error", message: "The organization store is still starting up. Try again in a moment." };
+    const result = await active.create(organization);
+    if (result.status === "success") {
+      setOrganizationRecords((current) => [result.value, ...current.filter((item) => item.appId !== result.value.appId)]);
+    }
+    return result;
+  };
+  const updateOrganization = async (organization: Organization, expectedVersion: number): Promise<OrganizationResult<Organization>> => {
+    const active = organizationProvider.current;
+    if (!active) return { status: "network_error", message: "The organization store is still starting up. Try again in a moment." };
+    const result = await active.update(organization, expectedVersion);
+    if (result.status === "success") {
+      setOrganizationRecords((current) => current.map((item) => (item.appId === result.value.appId ? result.value : item)));
+    }
+    return result;
+  };
+  const organizationRecordsRef = useRef<Organization[]>(organizationRecords);
+  useEffect(() => {
+    // Keeps the Work Record DataProvider's internal reference-organization set in sync with the
+    // currently-known durable Organizations (see lib/data-provider.ts "setDurableOrganizations"),
+    // so createWorkRecord/updateWorkRecord validation never rejects an organization the UI
+    // itself offers as selectable. Mirrors the Project/Contact mechanism exactly.
+    organizationRecordsRef.current = organizationRecords;
+    provider.current?.setDurableOrganizations(organizationRecords);
+  }, [organizationRecords]);
   const allProjects: Project[] = references ? [...references.projects, ...projectRecords] : projectRecords;
   const allContacts: Contact[] = references ? [...references.contacts, ...contactRecords] : contactRecords;
-  const effectiveReferences: ReferenceData | null = references ? { ...references, projects: allProjects, contacts: allContacts } : null;
+  const allOrganizations: Organization[] = references ? [...references.organizations, ...organizationRecords] : organizationRecords;
+  const effectiveReferences: ReferenceData | null = references
+    ? { ...references, projects: allProjects, contacts: allContacts, organizations: allOrganizations }
+    : null;
   const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
     const active = inboxProvider.current;
     if (!active) return { status: "network_error", message: "The inbox store is still starting up. Try again in a moment." };
@@ -357,13 +423,14 @@ export default function IUWorkTracker({
           provider.current = selected.provider;
           kind = selected.kind;
         }
-        // Patch 7 / 8B: sync whatever durable Projects/Contacts are already known (via the
-        // refs, not the possibly-stale state closures — see the projectRecordsRef/
-        // contactRecordsRef effects below) the moment this provider becomes available, so
-        // createWorkRecord/updateWorkRecord validation is correct regardless of which
-        // provider-load effect resolves first.
+        // Patch 7 / 8B / 8E: sync whatever durable Projects/Contacts/Organizations are already
+        // known (via the refs, not the possibly-stale state closures — see the
+        // projectRecordsRef/contactRecordsRef/organizationRecordsRef effects below) the moment
+        // this provider becomes available, so createWorkRecord/updateWorkRecord validation is
+        // correct regardless of which provider-load effect resolves first.
         provider.current.setDurableProjects(projectRecordsRef.current);
         provider.current.setDurableContacts(contactRecordsRef.current);
+        provider.current.setDurableOrganizations(organizationRecordsRef.current);
         await loadFrom(provider.current);
       } catch {
         // Selecting or loading from the active provider failed (including a SharePoint
@@ -543,6 +610,13 @@ export default function IUWorkTracker({
               saveContact={saveContact}
               updateContact={updateContact}
               openLog={openLog}
+            />
+          ) : view === "organizations" ? (
+            <Organizations
+              organizations={allOrganizations}
+              loadFailed={organizationLoadFailed}
+              saveOrganization={saveOrganization}
+              updateOrganization={updateOrganization}
             />
           ) : view === "orbit" ? (
             <Orbit records={records} references={effectiveReferences} />
@@ -1255,6 +1329,229 @@ function ProjectFormModal({
           </button>
           <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.name.trim()}>
             {saving ? "Saving…" : isEditing ? "Save Changes" : "Create Project"}
+          </button>
+        </footer>
+      </section>
+    </div>
+  );
+}
+
+const ORGANIZATION_TYPE_LABELS: Record<OrganizationTypeValue, string> = {
+  district: "District",
+  partner: "Partner",
+  iu: "IU",
+};
+
+function emptyOrganizationDraft(): Organization {
+  return buildOrganizationDraft({ appId: crypto.randomUUID(), name: "", type: "partner" });
+}
+
+/**
+ * Patch 8E — Durable Organizations, identity/basic metadata only: directory + Create/Edit, no
+ * connected-work metrics, no detail screen. District remains Organization.type === "district" —
+ * there is no separate District model, provider, or list. Seed/reference Organizations (no
+ * `metadata`) stay read-only, mirroring the Project/Contact precedent exactly.
+ */
+function Organizations({
+  organizations,
+  loadFailed,
+  saveOrganization,
+  updateOrganization,
+}: {
+  organizations: Organization[];
+  loadFailed: boolean;
+  saveOrganization: (organization: Organization) => Promise<OrganizationResult<Organization>>;
+  updateOrganization: (organization: Organization, expectedVersion: number) => Promise<OrganizationResult<Organization>>;
+}) {
+  const [search, setSearch] = useState("");
+  const [modalOrganization, setModalOrganization] = useState<Organization | null>(null);
+
+  // Case-insensitive substring match only — the same philosophy already used for
+  // Contacts/History search. No fuzzy/semantic matching.
+  const filtered = organizations.filter((organization) =>
+    `${organization.name} ${ORGANIZATION_TYPE_LABELS[organization.type]}`.toLowerCase().includes(search.toLowerCase()),
+  );
+
+  return (
+    <div className="screen-inner">
+      <PageHeading
+        eyebrow="Districts and partners"
+        title="Organizations"
+        copy="The districts, partners, and IU entities your work connects to."
+      />
+      <div className="log-footer" style={{ padding: 0, marginBottom: 13 }}>
+        <label className="search-box">
+          <span>⌕</span>
+          <input
+            value={search}
+            onChange={(event) => setSearch(event.target.value)}
+            placeholder="Search name or type"
+            aria-label="Search organizations"
+          />
+        </label>
+      </div>
+      {loadFailed && <p className="muted-copy">Organizations could not be fully loaded. Try reloading the page.</p>}
+      <div className="project-grid">
+        {filtered.map((organization) => {
+          // Only a durable organization (created/loaded through the Organization provider) is
+          // editable. The four seeded reference-data organizations have no `metadata` and
+          // remain read-only in V1 — mirrors the Project/Contact precedent exactly.
+          const isDurable = Boolean(organization.metadata);
+          return (
+            <article className="project-card" key={organization.appId}>
+              <div className="project-title">
+                <span className="status-chip">{ORGANIZATION_TYPE_LABELS[organization.type]}</span>
+                <h2>{organization.name}</h2>
+              </div>
+              {isDurable && (
+                <div className="project-card-actions">
+                  <span />
+                  <button type="button" className="ghost-button" onClick={() => setModalOrganization(organization)}>
+                    Edit
+                  </button>
+                </div>
+              )}
+            </article>
+          );
+        })}
+        <button type="button" className="planned-note" aria-label="Add Organization" onClick={() => setModalOrganization(emptyOrganizationDraft())}>
+          <span>＋</span>
+          <div>
+            <strong>Add Organization</strong>
+            <p>Becomes selectable in Log Work and Contacts immediately.</p>
+          </div>
+        </button>
+      </div>
+      {!filtered.length && <Empty title="No matching organizations" copy="Try a different search phrase." />}
+      {modalOrganization && (
+        <OrganizationFormModal
+          organization={modalOrganization}
+          organizations={organizations}
+          onCancel={() => setModalOrganization(null)}
+          onSaved={() => setModalOrganization(null)}
+          saveOrganization={saveOrganization}
+          updateOrganization={updateOrganization}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A single compact overlay handles both Create and Edit — mirrors ContactFormModal/
+ * ProjectFormModal exactly. Duplicate detection is conservative and deterministic (trim +
+ * collapse whitespace + lowercase, exact match only — never fuzzy): a name-only match is an
+ * informational warning that never blocks Save, since Organization has no email field to serve
+ * as a stronger signal.
+ */
+function OrganizationFormModal({
+  organization,
+  organizations,
+  onCancel,
+  onSaved,
+  saveOrganization,
+  updateOrganization,
+}: {
+  organization: Organization;
+  organizations: Organization[];
+  onCancel: () => void;
+  onSaved: () => void;
+  saveOrganization: (organization: Organization) => Promise<OrganizationResult<Organization>>;
+  updateOrganization: (organization: Organization, expectedVersion: number) => Promise<OrganizationResult<Organization>>;
+}) {
+  const [draft, setDraft] = useState<Organization>(organization);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const nameRef = useRef<HTMLInputElement>(null);
+  const isEditing = (draft.metadata?.version ?? 0) > 0;
+
+  useEffect(() => {
+    nameRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const patch = (change: Partial<Organization>) => setDraft((current) => ({ ...current, ...change }));
+
+  const otherOrganizations = organizations.filter((item) => item.appId !== draft.appId);
+  const nameDuplicate = draft.name.trim()
+    ? otherOrganizations.find((item) => normalizeOrganizationName(item.name) === normalizeOrganizationName(draft.name))
+    : undefined;
+
+  const submit = async () => {
+    if (saving) return;
+    const shapeIssues = validateOrganizationShape(draft);
+    if (shapeIssues.length) {
+      setError(shapeIssues[0].message);
+      return;
+    }
+    setSaving(true);
+    setError("");
+    const result = isEditing ? await updateOrganization(draft, draft.metadata!.version) : await saveOrganization(draft);
+    setSaving(false);
+    if (result.status !== "success") {
+      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the organization and try again.") : result.message);
+      return;
+    }
+    onSaved();
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="organization-modal-title">
+        <header className="log-header">
+          <h2 id="organization-modal-title">{isEditing ? "Edit Organization" : "Add Organization"}</h2>
+          <button onClick={onCancel} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="log-content">
+          <div className="form-stack">
+            <label>
+              <span>
+                Name <b>*</b>
+              </span>
+              <input
+                ref={nameRef}
+                value={draft.name}
+                onChange={(event) => patch({ name: event.target.value })}
+                placeholder="e.g. North Valley SD"
+              />
+            </label>
+            {nameDuplicate && (
+              <p className="muted-copy" role="status">
+                Another organization is already named &ldquo;{nameDuplicate.name}&rdquo;. This is just a heads up — Save is not blocked.
+              </p>
+            )}
+            <label>
+              <span>Type</span>
+              <select value={draft.type} onChange={(event) => patch({ type: event.target.value as OrganizationTypeValue })}>
+                {ORGANIZATION_TYPES.map((type) => (
+                  <option key={type} value={type}>
+                    {ORGANIZATION_TYPE_LABELS[type]}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+        </div>
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        )}
+        <footer className="log-footer">
+          <button className="ghost-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.name.trim()}>
+            {saving ? "Saving…" : isEditing ? "Save Changes" : "Add Organization"}
           </button>
         </footer>
       </section>

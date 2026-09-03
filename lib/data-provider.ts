@@ -55,6 +55,16 @@ export interface DataProvider {
    * durable contact would fail validation even though the UI offers it as selectable.
    */
   setDurableContacts(contacts: Contact[]): void;
+  /**
+   * Patch 8E: same mechanism as setDurableProjects/setDurableContacts, for durable
+   * Organizations (lib/organization-provider.ts). createWorkRecord/updateWorkRecord validate
+   * organizationIds against `this.references.organizations` — without this, a Work Record
+   * referencing a newly-created durable organization would fail validation even though the UI
+   * offers it as selectable. District status (`type === "district"`) is derived from whatever
+   * is in this merged set, so a durable district also participates in engagementScope
+   * validation and Inbox district matching automatically.
+   */
+  setDurableOrganizations(organizations: Organization[]): void;
 }
 
 abstract class ReferenceProvider {
@@ -64,6 +74,9 @@ abstract class ReferenceProvider {
   }
   setDurableContacts(durableContacts: Contact[]): void {
     this.references = { ...this.references, contacts: [...REFERENCE_DATA.contacts, ...durableContacts] };
+  }
+  setDurableOrganizations(durableOrganizations: Organization[]): void {
+    this.references = { ...this.references, organizations: [...REFERENCE_DATA.organizations, ...durableOrganizations] };
   }
   async getProjects() { return structuredClone(this.references.projects); }
   async getOrganizations() { return structuredClone(this.references.organizations); }

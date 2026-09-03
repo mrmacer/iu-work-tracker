@@ -66,7 +66,23 @@ export type Project = {
   stemOrbit?: boolean;
   metadata?: ProviderMetadata;
 };
-export type Organization = { appId: string; name: string; type: "district" | "partner" | "iu" };
+/**
+ * Patch 8E — Organizations (previously reference/configuration data only, see
+ * docs/DATA_MODEL.md "Reference and configuration entities") gains an optional durable
+ * dimension, following the exact Project/Contact precedent. `metadata` is optional so the four
+ * existing seeded organizations in lib/reference-data.ts remain valid Organization values
+ * unchanged — they are simply never durable (no `metadata`). The `type` taxonomy is
+ * deliberately unchanged: `district` | `partner` | `iu` only. District remains
+ * `Organization.type === "district"` — there is no separate District model. An Organization
+ * with `metadata` present was created/loaded through lib/organization-provider.ts; one without
+ * it is a static seeded organization.
+ */
+export type Organization = {
+  appId: string;
+  name: string;
+  type: "district" | "partner" | "iu";
+  metadata?: ProviderMetadata;
+};
 
 /**
  * Patch 8B — Contacts (previously reference/configuration data only, see docs/DATA_MODEL.md
