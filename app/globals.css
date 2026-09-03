@@ -19,3 +19,6 @@
 
 /* Patch 8D — Intelligence Contact matching review panel (app/ContactMatchPanel.tsx). */
 .contact-match-panel{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;padding:10px 12px;border:1px solid var(--line);border-radius:10px;background:#fff;margin-top:8px}.contact-match-panel.matched{background:var(--teal-pale);border-color:var(--teal)}.contact-match-panel.ignored{opacity:.6}.contact-match-panel strong,.contact-match-panel small{display:block}.contact-match-panel strong{font-size:10px}.contact-match-panel small{margin-top:3px;color:var(--muted);font-size:9px}.contact-match-candidates{list-style:none;margin:8px 0 0;padding:0;display:flex;flex-direction:column;gap:6px}.contact-match-candidates li{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:#f7f6f0;font-size:9px}.contact-match-actions{display:flex;gap:6px;margin-top:8px}
+
+/* Patch 8F — Reviewed Contact Import row (app/ContactImport.tsx). */
+.import-row{padding:13px 4px;border-bottom:1px solid var(--line)}.import-row:last-child{border-bottom:0}.import-row-evidence{display:flex;flex-wrap:wrap;align-items:baseline;gap:10px;margin-bottom:4px}.import-row-evidence strong{font-size:12px}.import-row-evidence span{font-size:9px}

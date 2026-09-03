@@ -51,6 +51,7 @@ import {
 } from "../lib/project-provider";
 import { deriveReportingDays } from "../lib/reporting";
 import ContactFormModal, { CONTACT_STATUS_LABELS, emptyContactDraft } from "./ContactFormModal";
+import ContactImport from "./ContactImport";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
 import MeetingNotes from "./MeetingNotes";
@@ -1589,9 +1590,22 @@ function Contacts({
   const [showArchived, setShowArchived] = useState(false);
   const [modalContact, setModalContact] = useState<Contact | null>(null);
   const [openContactId, setOpenContactId] = useState<string | null>(null);
+  const [showImport, setShowImport] = useState(false);
 
   const organizationName = (id: string | null) =>
     id ? (organizations.find((org) => org.appId === id)?.name ?? "Unknown organization") : "";
+
+  if (showImport) {
+    return (
+      <ContactImport
+        contacts={contacts}
+        organizations={organizations}
+        saveContact={saveContact}
+        updateContact={updateContact}
+        onBack={() => setShowImport(false)}
+      />
+    );
+  }
 
   const openContact = openContactId ? contacts.find((contact) => contact.appId === openContactId) : undefined;
   if (openContact) {
@@ -1622,6 +1636,8 @@ function Contacts({
         eyebrow="People and organizations"
         title="Contacts"
         copy="Who you work with — matched to work you've already logged, not a CRM."
+        action="Import Contacts"
+        onAction={() => setShowImport(true)}
       />
       <div className="log-footer" style={{ padding: 0, marginBottom: 13 }}>
         <label className="search-box">
