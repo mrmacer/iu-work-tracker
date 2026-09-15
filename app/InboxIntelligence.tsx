@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { MAX_EMAIL_LENGTH } from "../lib/anthropic-config";
 import type { AnalyzeEmailResult, AnalyzeEmailUsage } from "../lib/anthropic-email-analysis";
 import ContactMatchPanel, { resolveMatchedContacts } from "./ContactMatchPanel";
@@ -77,6 +77,11 @@ export default function InboxIntelligence({
   const [justSaved, setJustSaved] = useState<InboxIntelligenceRecord | null>(null);
   const [rowError, setRowError] = useState("");
   const [busyAppId, setBusyAppId] = useState<string | null>(null);
+  // Patch 7.1 — Edit existing intelligence. Holds the durable record currently open for editing,
+  // regardless of its status (open/waiting/resolved) — "resolved is a status, not a dead end."
+  // Purely a view-state toggle, same pattern as addPersonName/editingProject elsewhere in this
+  // app: nothing here is written until Save Changes explicitly calls updateRecord().
+  const [editRecord, setEditRecord] = useState<InboxIntelligenceRecord | null>(null);
   // Patch 8D — People review state for the CURRENT (unsaved) analysis only. Keyed by the exact
   // detected name string. Never persisted directly: at Save, only the accepted "matched"
   // decisions become matchedContactIds — an "ignored" decision or an unreviewed person leaves
@@ -495,6 +500,7 @@ export default function InboxIntelligence({
         busyAppId={busyAppId}
         onCreateWorkRecord={createWorkRecordFrom}
         onUpdateStatus={updateStatus}
+        onEdit={setEditRecord}
         references={references}
         empty="Nothing needs attention right now."
       />
@@ -504,6 +510,7 @@ export default function InboxIntelligence({
         busyAppId={busyAppId}
         onCreateWorkRecord={createWorkRecordFrom}
         onUpdateStatus={updateStatus}
+        onEdit={setEditRecord}
         references={references}
         empty="Nothing is waiting on someone else."
       />
@@ -513,9 +520,172 @@ export default function InboxIntelligence({
         busyAppId={busyAppId}
         onCreateWorkRecord={createWorkRecordFrom}
         onUpdateStatus={updateStatus}
+        onEdit={setEditRecord}
         references={references}
         empty="Nothing resolved yet."
       />
+
+      {editRecord && (
+        <EditIntelligenceModal
+          record={editRecord}
+          updateRecord={updateRecord}
+          onCancel={() => setEditRecord(null)}
+          onSaved={() => setEditRecord(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Patch 7.1 — edits the EXISTING durable Inbox Intelligence record in place. Only the fields
+ * exposed here (title, summary, priority, and each action item's action/owner/due date) can
+ * change; everything else on the record — needsAttention, followUp, tags, people/organizations/
+ * districts/projects, matched*Ids, status, resolvedAt, linkedWorkRecordAppId, appId, and
+ * metadata — is carried through unchanged via the `{ ...record }` spread below. Cancel makes
+ * zero writes. Save Changes makes exactly one updateRecord() call using the record's current
+ * RecordVersion (optimistic concurrency, same as every other editable resource in this app) —
+ * never a create(), so this can never produce a duplicate Inbox record. Makes zero Anthropic
+ * calls: nothing here touches /api/inbox-intelligence.
+ */
+function EditIntelligenceModal({
+  record,
+  updateRecord,
+  onCancel,
+  onSaved,
+}: {
+  record: InboxIntelligenceRecord;
+  updateRecord: (record: InboxIntelligenceRecord, expectedVersion: number) => Promise<InboxIntelligenceResult<InboxIntelligenceRecord>>;
+  onCancel: () => void;
+  onSaved: (saved: InboxIntelligenceRecord) => void;
+}) {
+  const [title, setTitle] = useState(record.analysis.suggestedWorkRecord.title);
+  const [summary, setSummary] = useState(record.analysis.summary);
+  const [priority, setPriority] = useState(record.analysis.priority);
+  const [actionItems, setActionItems] = useState(record.analysis.actionItems);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState("");
+  const titleRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    titleRef.current?.focus();
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onCancel]);
+
+  const patchActionItem = (index: number, patch: Partial<InboxIntelligenceRecord["analysis"]["actionItems"][number]>) => {
+    const next = [...actionItems];
+    next[index] = { ...next[index], ...patch };
+    setActionItems(next);
+  };
+
+  const submit = async () => {
+    if (saving) return;
+    setSaving(true);
+    setError("");
+    const updated: InboxIntelligenceRecord = {
+      ...record,
+      analysis: {
+        ...record.analysis,
+        summary,
+        priority,
+        actionItems,
+        suggestedWorkRecord: { ...record.analysis.suggestedWorkRecord, title },
+      },
+    };
+    const result = await updateRecord(updated, record.metadata.version);
+    setSaving(false);
+    if (result.status !== "success") {
+      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the record and try again.") : result.message);
+      return;
+    }
+    onSaved(result.value);
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="inbox-edit-modal-title">
+        <header className="log-header">
+          <h2 id="inbox-edit-modal-title">Edit Inbox Intelligence</h2>
+          <button onClick={onCancel} aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div className="log-content">
+          <div className="form-stack">
+            <label>
+              <span>
+                Title <b>*</b>
+              </span>
+              <input ref={titleRef} value={title} onChange={(event) => setTitle(event.target.value)} />
+            </label>
+            <label>
+              <span>Summary</span>
+              <textarea rows={3} value={summary} onChange={(event) => setSummary(event.target.value)} />
+            </label>
+            <label>
+              <span>Priority</span>
+              <select value={priority} onChange={(event) => setPriority(event.target.value as EmailAnalysis["priority"])}>
+                <option value="high">High</option>
+                <option value="medium">Medium</option>
+                <option value="low">Low</option>
+              </select>
+            </label>
+            {actionItems.length > 0 && (
+              <fieldset>
+                <legend>Action items</legend>
+                {actionItems.map((item, index) => (
+                  <div className="form-two" key={index}>
+                    <label>
+                      <span>Action</span>
+                      <input value={item.action} onChange={(event) => patchActionItem(index, { action: event.target.value })} />
+                    </label>
+                    <label>
+                      <span>Owner</span>
+                      <select value={item.owner} onChange={(event) => patchActionItem(index, { owner: event.target.value as typeof item.owner })}>
+                        <option value="me">Me</option>
+                        <option value="sender">Sender</option>
+                        <option value="other">Other</option>
+                        <option value="unknown">Unknown</option>
+                      </select>
+                    </label>
+                    <label>
+                      <span>Due date</span>
+                      <input
+                        type="date"
+                        value={item.dueDate ?? ""}
+                        onChange={(event) => patchActionItem(index, { dueDate: event.target.value || null })}
+                      />
+                    </label>
+                    <button type="button" className="ghost-button" onClick={() => setActionItems(actionItems.filter((_, i) => i !== index))}>
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </fieldset>
+            )}
+          </div>
+        </div>
+        {error && (
+          <div className="form-error" role="alert">
+            {error}
+          </div>
+        )}
+        <footer className="log-footer">
+          <button className="ghost-button" onClick={onCancel}>
+            Cancel
+          </button>
+          <button className="primary-action" onClick={() => void submit()} disabled={saving || !title.trim()}>
+            {saving ? "Saving…" : "Save Changes"}
+          </button>
+        </footer>
+      </section>
     </div>
   );
 }
@@ -526,6 +696,7 @@ function InboxSection({
   busyAppId,
   onCreateWorkRecord,
   onUpdateStatus,
+  onEdit,
   references,
   empty,
 }: {
@@ -534,6 +705,7 @@ function InboxSection({
   busyAppId: string | null;
   onCreateWorkRecord: (record: InboxIntelligenceRecord) => void;
   onUpdateStatus: (record: InboxIntelligenceRecord, status: InboxIntelligenceStatus) => void;
+  onEdit: (record: InboxIntelligenceRecord) => void;
   references: ReferenceData;
   empty: string;
 }) {
@@ -551,6 +723,7 @@ function InboxSection({
             busy={busyAppId === record.appId}
             onCreateWorkRecord={onCreateWorkRecord}
             onUpdateStatus={onUpdateStatus}
+            onEdit={onEdit}
             references={references}
           />
         ))
@@ -566,12 +739,14 @@ function InboxRow({
   busy,
   onCreateWorkRecord,
   onUpdateStatus,
+  onEdit,
   references,
 }: {
   record: InboxIntelligenceRecord;
   busy: boolean;
   onCreateWorkRecord: (record: InboxIntelligenceRecord) => void;
   onUpdateStatus: (record: InboxIntelligenceRecord, status: InboxIntelligenceStatus) => void;
+  onEdit: (record: InboxIntelligenceRecord) => void;
   references: ReferenceData;
 }) {
   const relatedProject = record.matchedProjectIds[0]
@@ -588,19 +763,24 @@ function InboxRow({
   const matchedContacts = resolveMatchedContacts(record.matchedContactIds, references.contacts);
 
   return (
-    <div className="record-row" style={{ cursor: "default", flexWrap: "wrap", minHeight: "auto", padding: "10px 4px" }}>
+    <div className="inbox-row">
       <span className={`record-dot ${record.analysis.needsAttention ? "iu" : "orbit"}`} />
-      <span>
-        <strong>{record.analysis.suggestedWorkRecord.title}</strong>
-        <small>
-          {record.analysis.priority} priority · {record.analysis.actionItems.length} action item
-          {record.analysis.actionItems.length === 1 ? "" : "s"}
-          {record.analysis.followUp ? ` · ${record.analysis.followUp}` : ""}
-          {relatedProject ? ` · ${relatedProject}` : relatedOrg ? ` · ${relatedOrg}` : ""}
-          {matchedContacts.length ? ` · ${matchedContacts.map((c) => c.displayName).join(", ")}` : ""} · updated {lastModified(record)}
-        </small>
-      </span>
-      <span style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+      <div className="inbox-row-body">
+        <strong className="inbox-row-title">{record.analysis.suggestedWorkRecord.title}</strong>
+        {record.analysis.summary && <p className="inbox-row-summary">{record.analysis.summary}</p>}
+        <div className="inbox-row-meta">
+          <span>{record.analysis.priority} priority</span>
+          <span>
+            {record.analysis.actionItems.length} action item{record.analysis.actionItems.length === 1 ? "" : "s"}
+          </span>
+          {record.status === "waiting" && <span>Waiting</span>}
+          {record.analysis.followUp && <span>{record.analysis.followUp}</span>}
+          {relatedProject ? <span>{relatedProject}</span> : relatedOrg ? <span>{relatedOrg}</span> : null}
+          {matchedContacts.length ? <span>{matchedContacts.map((c) => c.displayName).join(", ")}</span> : null}
+          <span>Updated {lastModified(record)}</span>
+        </div>
+      </div>
+      <div className="inbox-row-actions">
         {record.status === "open" && (
           <>
             <button className="ghost-button" disabled={busy} onClick={() => onUpdateStatus(record, "waiting")}>
@@ -626,6 +806,9 @@ function InboxRow({
             Reopen
           </button>
         )}
+        <button className="ghost-button" disabled={busy} onClick={() => onEdit(record)}>
+          Edit
+        </button>
         {record.linkedWorkRecordAppId ? (
           <span className="muted-copy">Linked to a Work Record</span>
         ) : (
@@ -633,7 +816,7 @@ function InboxRow({
             Create Work Record
           </button>
         )}
-      </span>
+      </div>
     </div>
   );
 }

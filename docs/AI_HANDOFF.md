@@ -409,6 +409,19 @@ A safe, review-first way to bring existing people/contact data into the durable 
 
 ---
 
+## Inbox Intelligence Readability + Edit/Reopen (Patch 7.1) — GREEN
+
+Small usability patch. Core principle: **resolved is a status, not a dead end** — a durable Inbox Intelligence record remains durable institutional context, and remains correctable, after it is marked resolved.
+
+- **Readability** (`app/InboxIntelligence.tsx`, `app/globals.css`): `InboxRow` is restructured into a title (`.inbox-row-title`, ~15px/bold), a newly-rendered summary line (`.inbox-row-summary`, `analysis.summary` — previously computed but never displayed in the compact list), a metadata line (`.inbox-row-meta`, ~11px), and an actions cluster (`.inbox-row-actions`, slightly larger click targets). All four classes are scoped to Inbox rows only — `.record-row` (Work Records, History, etc.) is untouched, and no global font size changed.
+- **Edit — existing durable records only**: a new "Edit" action appears on every Inbox Intelligence row regardless of status (open/waiting/resolved), opening a compact modal styled like Patch 7's `ProjectFormModal` (`.modal-backdrop`/`.project-modal`). Only `title` (`analysis.suggestedWorkRecord.title`), `summary`, `priority`, and each action item's `action`/`owner`/`dueDate` are editable — the fields the patch's own audit judged safe to expose; everything else on the record (`needsAttention`, `followUp`, `tags`, `people`/`organizations`/`districts`/`projects`, every `matched*Id`, `status`, `resolvedAt`, `linkedWorkRecordAppId`, `appId`, `metadata`) is carried through unchanged. Cancel makes zero writes. Save Changes makes exactly one `updateRecord()` call using the record's current `RecordVersion` — never a `create()`, so editing can never produce a duplicate Inbox record — and makes zero Anthropic calls.
+- **Reopen already existed** (`InboxRow`'s `waiting`/`resolved` branches already called `onUpdateStatus(record, "open")` through the same `updateRecord()` pathway) — this patch adds no new Reopen code path, only test coverage proving it: exactly one `update()` call, status returns to `open`, content and `appId` are preserved, and nothing is created (no Work Record, no second Inbox record) or calls Anthropic.
+- **Test coverage**: `tests/inbox-intelligence-edit-reopen-ui.test.tsx` — the new Inbox-specific CSS classes exist and are applied; Edit is available on open/waiting/resolved records; Edit opens prefilled with current values; Cancel writes nothing; Save Changes makes exactly one `update()` (never a `create()`), preserves `appId`/`RecordVersion`/status (a waiting record stays waiting), and triggers zero fetch/Anthropic calls and zero `openLog()` (Work Record) calls; the same zero-create/zero-fetch/zero-Work-Record guarantees are proven for Reopen. The full existing suite (Mark waiting, Resolve, Inbox analysis, Action Center, SharePoint Inbox persistence) was re-run and shows zero regressions.
+
+**Status: GREEN.**
+
+---
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:
