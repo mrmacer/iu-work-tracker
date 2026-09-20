@@ -15,10 +15,15 @@ import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 import { REFERENCE_DATA } from "../lib/reference-data";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import { VOICE_CANDIDATE_TYPES, type VoiceCandidateType } from "../lib/voice-intelligence-models";
+import { VOICE_SESSION_STORAGE_KEY } from "../lib/voice-intelligence-session";
+import { createFakeStorage, installWindowStorage } from "./voice-session-test-utils";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // Patch 7.2: Voice Intelligence now keeps a temporary per-tab working session in
+  // sessionStorage, which jsdom shares across tests within one file — isolate each test.
+  window.sessionStorage.removeItem(VOICE_SESSION_STORAGE_KEY);
 });
 
 function baseWorkRecord(): WorkRecord {
@@ -169,14 +174,23 @@ describe("Log as work — uses current edited state, and performs zero persisten
     expect(draft.durationMinutes).toBe(60); // base default from createDraftRecord(), unchanged
   });
 
-  it("never persists anything, calls no provider, and touches no browser storage", async () => {
-    const setItem = vi.spyOn(Storage.prototype, "setItem");
-    const { user, fetchSpy, openLog } = await renderInReviewWithCompletedWork();
-    fetchSpy.mockClear();
-    await user.click(screen.getByRole("button", { name: "Log as work" }));
-    expect(openLog).toHaveBeenCalledTimes(1);
-    expect(fetchSpy).not.toHaveBeenCalled(); // zero Anthropic / zero network calls from the click
-    expect(setItem).not.toHaveBeenCalled();
+  it("never persists anything durable, calls no provider or network, and touches no localStorage (only the temporary Voice session key in sessionStorage)", async () => {
+    const localFake = createFakeStorage();
+    const sessionFake = createFakeStorage();
+    const restoreLocal = installWindowStorage("localStorage", localFake);
+    const restoreSession = installWindowStorage("sessionStorage", sessionFake);
+    try {
+      const { user, fetchSpy, openLog } = await renderInReviewWithCompletedWork();
+      fetchSpy.mockClear();
+      await user.click(screen.getByRole("button", { name: "Log as work" }));
+      expect(openLog).toHaveBeenCalledTimes(1);
+      expect(fetchSpy).not.toHaveBeenCalled(); // zero Anthropic / zero network calls from the click
+      expect(localFake.setItemCalls).toEqual([]);
+      for (const [key] of sessionFake.setItemCalls) expect(key).toBe(VOICE_SESSION_STORAGE_KEY);
+    } finally {
+      restoreLocal();
+      restoreSession();
+    }
   });
 
   it("does not mutate the candidate's own review state when opening the form", async () => {

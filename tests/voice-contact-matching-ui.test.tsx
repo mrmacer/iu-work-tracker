@@ -14,10 +14,14 @@ import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import { MemoryContactProvider } from "../lib/contact-provider";
 import { WORK_RECORD_SCHEMA_VERSION, type Contact, type WorkRecord } from "../lib/models";
 import { REFERENCE_DATA } from "../lib/reference-data";
+import { VOICE_SESSION_STORAGE_KEY } from "../lib/voice-intelligence-session";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // Patch 7.2: Voice Intelligence now keeps a temporary per-tab working session in
+  // sessionStorage, which jsdom shares across tests within one file — isolate each test.
+  window.sessionStorage.removeItem(VOICE_SESSION_STORAGE_KEY);
 });
 
 function baseWorkRecord(): WorkRecord {

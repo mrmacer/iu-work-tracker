@@ -6,10 +6,15 @@ import VoiceIntelligence from "../app/VoiceIntelligence";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import { WORK_RECORD_SCHEMA_VERSION, type WorkRecord } from "../lib/models";
 import { REFERENCE_DATA } from "../lib/reference-data";
+import { VOICE_SESSION_STORAGE_KEY } from "../lib/voice-intelligence-session";
+import { createFakeStorage, installWindowStorage } from "./voice-session-test-utils";
 
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // Patch 7.2: Voice Intelligence now keeps a temporary per-tab working session in
+  // sessionStorage, which jsdom shares across tests within one file — isolate each test.
+  window.sessionStorage.removeItem(VOICE_SESSION_STORAGE_KEY);
 });
 
 // This file exercises the paste/analyze/review/edit surface only. The "Log as work" handoff
@@ -188,18 +193,27 @@ describe("VoiceIntelligence — review and edit, zero persistence", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1); // still exactly the one analyze() request
   });
 
-  it("never writes to localStorage or sessionStorage through the full paste → analyze → edit flow", async () => {
-    const setItem = vi.spyOn(Storage.prototype, "setItem");
-    const removeItem = vi.spyOn(Storage.prototype, "removeItem");
-    const clear = vi.spyOn(Storage.prototype, "clear");
-    const { user } = await renderInReview();
-    const titleInput = screen.getByDisplayValue("Send Kim the Discovery materials");
-    await user.type(titleInput, " today");
-    await user.click(screen.getAllByRole("checkbox")[0]);
-    await user.click(screen.getAllByRole("button", { name: "Remove" })[0]);
-    expect(setItem).not.toHaveBeenCalled();
-    expect(removeItem).not.toHaveBeenCalled();
-    expect(clear).not.toHaveBeenCalled();
+  it("never writes to localStorage, and writes only the temporary Voice session key to sessionStorage, through the full paste → analyze → edit flow", async () => {
+    // Patch 7.2: sessionStorage is now used INTENTIONALLY for the per-tab working session — but
+    // only under its one namespaced key, and never localStorage. (Spies are on the window's
+    // storage objects directly: this environment's jsdom storages are not Storage instances.)
+    const localFake = createFakeStorage();
+    const sessionFake = createFakeStorage();
+    const restoreLocal = installWindowStorage("localStorage", localFake);
+    const restoreSession = installWindowStorage("sessionStorage", sessionFake);
+    try {
+      const { user } = await renderInReview();
+      const titleInput = screen.getByDisplayValue("Send Kim the Discovery materials");
+      await user.type(titleInput, " today");
+      await user.click(screen.getAllByRole("checkbox")[0]);
+      await user.click(screen.getAllByRole("button", { name: "Remove" })[0]);
+      expect(localFake.setItemCalls).toEqual([]);
+      expect(sessionFake.setItemCalls.length).toBeGreaterThan(0);
+      for (const [key] of sessionFake.setItemCalls) expect(key).toBe(VOICE_SESSION_STORAGE_KEY);
+    } finally {
+      restoreLocal();
+      restoreSession();
+    }
   });
 
   it("shows a friendly empty state when no candidates are returned", async () => {

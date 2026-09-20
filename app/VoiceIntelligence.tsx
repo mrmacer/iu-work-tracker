@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import type { AnalyzeTranscriptResult, AnalyzeTranscriptUsage } from "../lib/anthropic-voice-analysis";
+import { useRef, useState } from "react";
+import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import type { Contact, ReferenceData, WorkRecord } from "../lib/models";
 import { MAX_TRANSCRIPT_LENGTH } from "../lib/voice-intelligence-config";
 import {
@@ -11,25 +11,32 @@ import {
   type VoiceCandidateType,
 } from "../lib/voice-intelligence-models";
 import { buildWorkRecordDraftFromVoiceCandidate } from "../lib/voice-intelligence-work-record";
+import {
+  emptyVoiceSession,
+  getBrowserSessionStorage,
+  loadVoiceSession,
+  saveVoiceSession,
+  withCandidateLogged,
+  type VoiceReviewCandidate,
+  type VoiceSessionStorage,
+  type VoiceWorkingSessionV1,
+} from "../lib/voice-intelligence-session";
 import ContactFormModal, { emptyContactDraft } from "./ContactFormModal";
 import ContactMatchPanel from "./ContactMatchPanel";
-import { matchContactCandidates, type ContactMatchDecision } from "../lib/contact-matching";
+import { matchContactCandidates } from "../lib/contact-matching";
 import type { ContactResult } from "../lib/contact-provider";
 
-type Phase = "paste" | "review";
-
 /**
- * Local browser review state only — an AI candidate plus the fields the review UI needs that
- * the model never produces: a stable React key, whether the user has it selected, and — Patch
- * 8D, PERSON candidates only — a deterministic Contact-match review decision. Nothing here is
- * ever written to SharePoint, Work Records, Inbox Intelligence, Organizations, Projects, a
- * Knowledge Base, or any browser storage: Voice Intelligence has no durable persistence at all
- * (see docs/AI_HANDOFF.md "Voice Intelligence V1"), so contactDecision is exactly as transient
- * as every other field here — a Contact created via "Add Person" IS durably saved (it reuses
- * the real Contact creation path, see app/ContactFormModal.tsx), but the fact that THIS
- * transcript's candidate matches it is not persisted anywhere once the page reloads.
+ * Local browser review state only — see VoiceReviewCandidate in lib/voice-intelligence-session.ts.
+ * Patch 7.2: this state now lives in a TEMPORARY per-tab working session (sessionStorage) so it
+ * survives navigation/remount, but it is still never written to SharePoint, Work Records, Inbox
+ * Intelligence, Organizations, Projects, a Knowledge Base, or localStorage — Voice Intelligence
+ * still has no durable persistence (see docs/AI_HANDOFF.md "Voice Intelligence working session
+ * (Patch 7.2)"). A Contact created via "Add Person" IS durably saved (it reuses the real Contact
+ * creation path, see app/ContactFormModal.tsx), but the fact that THIS transcript's candidate
+ * matches it lives only in the tab-scoped working session.
  */
-type ReviewCandidate = VoiceCandidate & { id: string; selected: boolean; contactDecision?: ContactMatchDecision };
+type ReviewCandidate = VoiceReviewCandidate;
 
 function toReviewCandidates(candidates: VoiceCandidate[]): ReviewCandidate[] {
   return candidates.map((candidate) => ({ ...candidate, id: crypto.randomUUID(), selected: true }));
@@ -41,23 +48,40 @@ export default function VoiceIntelligence({
   references,
   saveContact,
   updateContact,
+  storage,
 }: {
   openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
   createDraftRecord: () => WorkRecord;
   references: ReferenceData;
   saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
   updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
+  /** Test seam only: production passes nothing and the browser's sessionStorage is used. `null` disables persistence. */
+  storage?: VoiceSessionStorage | null;
 }) {
-  const [phase, setPhase] = useState<Phase>("paste");
-  const [transcript, setTranscript] = useState("");
+  // Patch 7.2 — the ONE temporary, per-tab Voice working session. Restored on mount with a pure
+  // sessionStorage read (never an Anthropic call); every meaningful change goes through commit().
+  const [sessionStore] = useState<VoiceSessionStorage | null>(() =>
+    storage !== undefined ? storage : getBrowserSessionStorage(),
+  );
+  const [restoredSession] = useState<VoiceWorkingSessionV1 | null>(() => loadVoiceSession(sessionStore));
+  const [session, setSession] = useState<VoiceWorkingSessionV1>(() => restoredSession ?? emptyVoiceSession());
+  // Always the latest committed session, so callbacks that outlive a render (the Work Record
+  // save callback, the async analyze result) never write a stale snapshot.
+  const latestSession = useRef(session);
+  const [persisted, setPersisted] = useState(true); // false once a storage write has failed
+  const [restored, setRestored] = useState(restoredSession !== null);
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState("");
-  const [candidates, setCandidates] = useState<ReviewCandidate[]>([]);
-  const [usage, setUsage] = useState<AnalyzeTranscriptUsage | null>(null);
 
-  const clearTranscript = () => {
-    setTranscript("");
-    setError("");
+  const { transcript, phase, candidates, usage } = session;
+
+  const commit = (update: (current: VoiceWorkingSessionV1) => VoiceWorkingSessionV1) => {
+    const next = update(latestSession.current);
+    latestSession.current = next;
+    setSession(next);
+    // Storage failure never blocks the screen: state above is already updated in memory.
+    setPersisted(saveVoiceSession(sessionStore, next));
+    setRestored(false);
   };
 
   // No AI request happens until this is explicitly called by the "Analyze transcript" click —
@@ -87,9 +111,13 @@ export default function VoiceIntelligence({
         setError(result?.message ?? "The transcript could not be analyzed. Try again.");
         return; // transcript is deliberately left in place — never cleared on failure
       }
-      setCandidates(toReviewCandidates(result.analysis.candidates));
-      setUsage(result.usage);
-      setPhase("review");
+      commit((current) => ({
+        ...current,
+        candidates: toReviewCandidates(result.analysis.candidates),
+        usage: result.usage,
+        phase: "review",
+        analyzed: true,
+      }));
     } catch {
       setError("The AI service could not be reached. Check your connection and try again.");
     } finally {
@@ -100,10 +128,14 @@ export default function VoiceIntelligence({
   const patchCandidate = (
     id: string,
     patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision">>,
-  ) => setCandidates((current) => current.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)));
+  ) =>
+    commit((current) => ({
+      ...current,
+      candidates: current.candidates.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)),
+    }));
 
   const removeCandidate = (id: string) =>
-    setCandidates((current) => current.filter((candidate) => candidate.id !== id));
+    commit((current) => ({ ...current, candidates: current.candidates.filter((candidate) => candidate.id !== id) }));
 
   // Patch 8D — deterministic Contact matching for PERSON candidates only. Zero AI calls, zero
   // network calls: see lib/contact-matching.ts. contactDecision is transient exactly like
@@ -115,23 +147,29 @@ export default function VoiceIntelligence({
   // never the original model output. Performs zero persistence: no Work Record is created,
   // no provider is called, and this candidate's own review state is left exactly as-is. The
   // human still reviews and explicitly saves through the existing, unmodified save path.
+  //
+  // Patch 7.2: the working session is persisted FIRST (so it is recoverable no matter where the
+  // human goes next), and the existing wizard is opened with an onSaved callback. That callback
+  // fires only when the existing Work Record save pathway reports SUCCESS — never on this click,
+  // a cancel, a validation failure, or a provider error — and marks just this candidate Logged
+  // (Voice-session UI state only; nothing is added to the Work Record).
   const logAsWork = (candidate: ReviewCandidate) => {
+    commit((current) => current);
     const draft = buildWorkRecordDraftFromVoiceCandidate(candidate, createDraftRecord());
-    openLog(draft);
+    openLog(draft, (savedWorkRecord) => commit((current) => withCandidateLogged(current, candidate.id, savedWorkRecord.appId)));
   };
 
-  const backToTranscript = () => {
-    setPhase("paste");
-  };
+  const backToTranscript = () => commit((current) => ({ ...current, phase: "paste" }));
 
+  // The deliberate destructive action for the temporary working session: clears the transcript,
+  // every candidate and review decision, and removes the sessionStorage entry.
   const startOver = () => {
-    setPhase("paste");
-    setCandidates([]);
-    setUsage(null);
+    commit(() => emptyVoiceSession());
     setError("");
     setAddPersonCandidateId(null);
-    clearTranscript();
   };
+
+  const sessionActive = persisted && (session.analyzed || transcript.trim().length > 0);
 
   const selectedCount = candidates.filter((candidate) => candidate.selected).length;
 
@@ -148,6 +186,13 @@ export default function VoiceIntelligence({
         </div>
       </div>
 
+      {sessionActive && (
+        <p className="muted-copy voice-session-status" role="status">
+          <strong>{restored ? "Working session restored." : "Working session saved in this tab."}</strong>{" "}
+          Closing this tab clears the temporary Voice Intelligence session.
+        </p>
+      )}
+
       {phase === "paste" && (
         <section className="panel">
           <div className="form-stack">
@@ -156,7 +201,7 @@ export default function VoiceIntelligence({
               <textarea
                 rows={16}
                 value={transcript}
-                onChange={(event) => setTranscript(event.target.value)}
+                onChange={(event) => commit((current) => ({ ...current, transcript: event.target.value }))}
                 placeholder="Paste the transcript — no need to clean it up first. Ramble is fine; the AI will sort it out."
               />
             </label>
@@ -170,7 +215,7 @@ export default function VoiceIntelligence({
             )}
           </div>
           <footer className="log-footer">
-            <button className="ghost-button" onClick={clearTranscript} disabled={analyzing}>
+            <button className="ghost-button" onClick={startOver} disabled={analyzing}>
               Clear
             </button>
             <button className="primary-action" onClick={() => void analyze()} disabled={analyzing || !transcript.trim()}>
@@ -290,11 +335,18 @@ function CandidateCard({
             </button>
           </span>
         )}
-        {candidate.type === "COMPLETED_WORK" && (
-          <button type="button" className="candidate-log-button" onClick={onLogAsWork}>
-            Log as work
-          </button>
-        )}
+        {candidate.loggedWorkRecordAppId && <span className="candidate-chip">Logged ✓</span>}
+        {candidate.type === "COMPLETED_WORK" &&
+          (candidate.loggedWorkRecordAppId ? (
+            // Already logged: de-emphasized, not disabled — logging again stays possible on purpose.
+            <button type="button" className="ghost-button" onClick={onLogAsWork}>
+              Log again
+            </button>
+          ) : (
+            <button type="button" className="candidate-log-button" onClick={onLogAsWork}>
+              Log as work
+            </button>
+          ))}
         <button type="button" className="ghost-button" onClick={onRemove}>
           Remove
         </button>

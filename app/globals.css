@@ -27,3 +27,4 @@
    only — does not change .record-row or any other list's typography. */
 .inbox-row{display:grid;grid-template-columns:9px 1fr auto;gap:14px;align-items:start;padding:15px 6px;border-bottom:1px solid var(--line)}.inbox-row:last-child{border-bottom:0}.inbox-row .record-dot{margin-top:6px}.inbox-row-body{min-width:0}.inbox-row-title{display:block;font-size:15px;font-weight:750;letter-spacing:-.01em;line-height:1.3}.inbox-row-summary{margin:5px 0 0;color:var(--ink);font-size:13px;line-height:1.5}.inbox-row-meta{display:flex;flex-wrap:wrap;gap:9px;margin-top:8px;color:var(--muted);font-size:11px}.inbox-row-actions{display:flex;flex-wrap:wrap;gap:8px;align-items:flex-start;justify-content:flex-end}.inbox-row-actions .ghost-button{padding:9px 13px;font-size:11px}
 @media(max-width:680px){.inbox-row{grid-template-columns:8px 1fr}.inbox-row-actions{grid-column:1/-1;justify-content:flex-start;margin-top:6px}}
+.voice-session-status{margin:-10px 0 14px}
