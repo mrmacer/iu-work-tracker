@@ -70,6 +70,10 @@ describe("Log as work — eligibility", () => {
         references={REFERENCE_DATA}
         saveContact={vi.fn()}
         updateContact={vi.fn()}
+        saveProject={vi.fn()}
+        updateProject={vi.fn()}
+        saveOrganization={vi.fn()}
+        updateOrganization={vi.fn()}
       />,
     );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
@@ -94,6 +98,10 @@ describe("Log as work — eligibility", () => {
         references={REFERENCE_DATA}
         saveContact={vi.fn()}
         updateContact={vi.fn()}
+        saveProject={vi.fn()}
+        updateProject={vi.fn()}
+        saveOrganization={vi.fn()}
+        updateOrganization={vi.fn()}
       />,
     );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
@@ -114,6 +122,10 @@ describe("Log as work — eligibility", () => {
         references={REFERENCE_DATA}
         saveContact={vi.fn()}
         updateContact={vi.fn()}
+        saveProject={vi.fn()}
+        updateProject={vi.fn()}
+        saveOrganization={vi.fn()}
+        updateOrganization={vi.fn()}
       />,
     );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");
@@ -138,6 +150,10 @@ describe("Log as work — uses current edited state, and performs zero persisten
         references={REFERENCE_DATA}
         saveContact={vi.fn()}
         updateContact={vi.fn()}
+        saveProject={vi.fn()}
+        updateProject={vi.fn()}
+        saveOrganization={vi.fn()}
+        updateOrganization={vi.fn()}
       />,
     );
     await user.type(screen.getByPlaceholderText(/paste the transcript/i), "Met with the team this morning.");

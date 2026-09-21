@@ -2,7 +2,7 @@
 
 import { useRef, useState } from "react";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
-import type { Contact, ReferenceData, WorkRecord } from "../lib/models";
+import type { Contact, Organization, Project, ReferenceData, WorkRecord } from "../lib/models";
 import { MAX_TRANSCRIPT_LENGTH } from "../lib/voice-intelligence-config";
 import {
   VOICE_CANDIDATE_TYPES,
@@ -23,8 +23,14 @@ import {
 } from "../lib/voice-intelligence-session";
 import ContactFormModal, { emptyContactDraft } from "./ContactFormModal";
 import ContactMatchPanel from "./ContactMatchPanel";
+import OrganizationFormModal, { emptyOrganizationDraft } from "./OrganizationFormModal";
+import ProjectFormModal, { emptyProjectDraft } from "./ProjectFormModal";
+import VoiceRoutingPanel from "./VoiceRoutingPanel";
 import { matchContactCandidates } from "../lib/contact-matching";
 import type { ContactResult } from "../lib/contact-provider";
+import type { OrganizationResult } from "../lib/organization-provider";
+import type { ProjectResult } from "../lib/project-provider";
+import { processedChipLabel } from "../lib/voice-routing";
 
 /**
  * Local browser review state only — see VoiceReviewCandidate in lib/voice-intelligence-session.ts.
@@ -48,6 +54,10 @@ export default function VoiceIntelligence({
   references,
   saveContact,
   updateContact,
+  saveProject,
+  updateProject,
+  saveOrganization,
+  updateOrganization,
   storage,
 }: {
   openLog: (record?: WorkRecord, onSaved?: (saved: WorkRecord) => void) => void;
@@ -55,6 +65,12 @@ export default function VoiceIntelligence({
   references: ReferenceData;
   saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
   updateContact: (contact: Contact, expectedVersion: number) => Promise<ContactResult<Contact>>;
+  // Patch 7.3 — the EXISTING durable Project/Organization providers (via IUWorkTracker), used
+  // only when the human explicitly saves the reused Create Project / Create Organization form.
+  saveProject: (project: Project) => Promise<ProjectResult<Project>>;
+  updateProject: (project: Project, expectedVersion: number) => Promise<ProjectResult<Project>>;
+  saveOrganization: (organization: Organization) => Promise<OrganizationResult<Organization>>;
+  updateOrganization: (organization: Organization, expectedVersion: number) => Promise<OrganizationResult<Organization>>;
   /** Test seam only: production passes nothing and the browser's sessionStorage is used. `null` disables persistence. */
   storage?: VoiceSessionStorage | null;
 }) {
@@ -127,12 +143,28 @@ export default function VoiceIntelligence({
 
   const patchCandidate = (
     id: string,
-    patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision">>,
+    patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision" | "contactCreated" | "routing">>,
   ) =>
+    commit((current) => {
+      const nextCandidates = current.candidates.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate));
+      // Nothing left selected → nothing to process, so the panel closes (selection itself is kept as-is).
+      const keepOpen = current.routingOpen && nextCandidates.some((candidate) => candidate.selected);
+      return { ...current, candidates: nextCandidates, routingOpen: keepOpen };
+    });
+
+  // Patch 7.3 — selection controls. Selecting means "include in the current processing batch";
+  // deselecting NEVER deletes a candidate (only Remove does).
+  const setAllSelected = (selected: boolean) =>
     commit((current) => ({
       ...current,
-      candidates: current.candidates.map((candidate) => (candidate.id === id ? { ...candidate, ...patch } : candidate)),
+      candidates: current.candidates.map((candidate) => ({ ...candidate, selected })),
+      routingOpen: selected ? current.routingOpen : false,
     }));
+  const openRouting = () => commit((current) => ({ ...current, routingOpen: true }));
+  const closeRouting = () => {
+    setSkippedIds(new Set());
+    commit((current) => ({ ...current, routingOpen: false }));
+  };
 
   const removeCandidate = (id: string) =>
     commit((current) => ({ ...current, candidates: current.candidates.filter((candidate) => candidate.id !== id) }));
@@ -142,6 +174,11 @@ export default function VoiceIntelligence({
   // every other Voice review field — see the ReviewCandidate doc comment above.
   const [addPersonCandidateId, setAddPersonCandidateId] = useState<string | null>(null);
   const addPersonCandidate = candidates.find((candidate) => candidate.id === addPersonCandidateId) ?? null;
+  // Patch 7.3 — transient routing-panel state: completed-work items skipped in THIS visit (skipping
+  // is not durable and loses nothing), and the candidate whose Create Organization/Project form is open.
+  const [skippedIds, setSkippedIds] = useState<Set<string>>(new Set());
+  const [createEntityId, setCreateEntityId] = useState<string | null>(null);
+  const createEntityCandidate = candidates.find((candidate) => candidate.id === createEntityId) ?? null;
 
   // Opens the existing Log Work form prefilled from the CURRENT edited candidate state —
   // never the original model output. Performs zero persistence: no Work Record is created,
@@ -172,6 +209,7 @@ export default function VoiceIntelligence({
   const sessionActive = persisted && (session.analyzed || transcript.trim().length > 0);
 
   const selectedCount = candidates.filter((candidate) => candidate.selected).length;
+  const routingVisible = Boolean(session.routingOpen) && selectedCount > 0;
 
   return (
     <div className="screen-inner">
@@ -242,8 +280,38 @@ export default function VoiceIntelligence({
               <div className="candidate-summary">
                 <span>{candidates.length} candidate{candidates.length === 1 ? "" : "s"}</span>
                 <span>{selectedCount} selected</span>
-                <span>{candidates.length - selectedCount} ignored</span>
+                <span>{candidates.length - selectedCount} not selected</span>
               </div>
+              {selectedCount > 0 && (
+                <div className="voice-tray" role="group" aria-label="Selected candidates">
+                  <button type="button" className="primary-action" onClick={openRouting} disabled={routingVisible}>
+                    Process selected
+                  </button>
+                  {selectedCount < candidates.length && (
+                    <button type="button" className="ghost-button" onClick={() => setAllSelected(true)}>
+                      Select all
+                    </button>
+                  )}
+                  <button type="button" className="ghost-button" onClick={() => setAllSelected(false)}>
+                    Clear selection
+                  </button>
+                  <span className="muted-copy">Checked candidates are included when you process. Unchecked ones stay here untouched.</span>
+                </div>
+              )}
+              {routingVisible && (
+                <VoiceRoutingPanel
+                  candidates={candidates}
+                  references={references}
+                  skippedIds={skippedIds}
+                  onSkip={(id) => setSkippedIds((current) => new Set(current).add(id))}
+                  onUnskip={() => setSkippedIds(new Set())}
+                  onLogAsWork={(candidate) => logAsWork(candidate as ReviewCandidate)}
+                  onPatch={patchCandidate}
+                  onAddPerson={setAddPersonCandidateId}
+                  onCreateEntity={setCreateEntityId}
+                  onClose={closeRouting}
+                />
+              )}
               <div className="candidate-list">
                 {candidates.map((candidate) => (
                   <CandidateCard
@@ -281,11 +349,45 @@ export default function VoiceIntelligence({
           organizations={references.organizations}
           onCancel={() => setAddPersonCandidateId(null)}
           onSaved={(savedContact) => {
-            patchCandidate(addPersonCandidate.id, { contactDecision: { type: "matched", contactAppId: savedContact.appId } });
+            patchCandidate(addPersonCandidate.id, { contactDecision: { type: "matched", contactAppId: savedContact.appId }, contactCreated: true });
             setAddPersonCandidateId(null);
           }}
           saveContact={saveContact}
           updateContact={updateContact}
+        />
+      )}
+
+      {createEntityCandidate && (createEntityCandidate.type === "ORGANIZATION" || createEntityCandidate.type === "DISTRICT") && (
+        // The existing Organization form and provider, prefilled only with the candidate's name
+        // (District → type "district"). Only the human's explicit Save writes anything.
+        <OrganizationFormModal
+          organization={{
+            ...emptyOrganizationDraft(),
+            name: createEntityCandidate.title,
+            type: createEntityCandidate.type === "DISTRICT" ? "district" : "partner",
+          }}
+          organizations={references.organizations}
+          onCancel={() => setCreateEntityId(null)}
+          onSaved={(saved) => {
+            patchCandidate(createEntityCandidate.id, { routing: { type: "created", entityAppId: saved.appId, entityName: saved.name } });
+            setCreateEntityId(null);
+          }}
+          saveOrganization={saveOrganization}
+          updateOrganization={updateOrganization}
+        />
+      )}
+
+      {createEntityCandidate && createEntityCandidate.type === "PROJECT" && (
+        // The existing Project form and provider, prefilled with the candidate's name/detail.
+        <ProjectFormModal
+          project={{ ...emptyProjectDraft(references.projects.length), name: createEntityCandidate.title, description: createEntityCandidate.detail }}
+          onCancel={() => setCreateEntityId(null)}
+          onSaved={(saved) => {
+            patchCandidate(createEntityCandidate.id, { routing: { type: "created", entityAppId: saved.appId, entityName: saved.name } });
+            setCreateEntityId(null);
+          }}
+          saveProject={saveProject}
+          updateProject={updateProject}
         />
       )}
     </div>
@@ -302,7 +404,7 @@ function CandidateCard({
 }: {
   candidate: ReviewCandidate;
   references: ReferenceData;
-  onPatch: (patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision">>) => void;
+  onPatch: (patch: Partial<Pick<ReviewCandidate, "type" | "title" | "detail" | "durationText" | "selected" | "contactDecision" | "contactCreated">>) => void;
   onRemove: () => void;
   onLogAsWork: () => void;
   onAddPerson: () => void;
@@ -313,6 +415,7 @@ function CandidateCard({
         <input
           type="checkbox"
           aria-label={candidate.selected ? "Deselect candidate" : "Select candidate"}
+          title="Include in the current processing batch (unchecking never deletes — use Remove for that)"
           checked={candidate.selected}
           onChange={(event) => onPatch({ selected: event.target.checked })}
         />
@@ -336,6 +439,7 @@ function CandidateCard({
           </span>
         )}
         {candidate.loggedWorkRecordAppId && <span className="candidate-chip">Logged ✓</span>}
+        {processedChipLabel(candidate) && <span className="candidate-chip">{processedChipLabel(candidate)}</span>}
         {candidate.type === "COMPLETED_WORK" &&
           (candidate.loggedWorkRecordAppId ? (
             // Already logged: de-emphasized, not disabled — logging again stays possible on purpose.
@@ -347,7 +451,7 @@ function CandidateCard({
               Log as work
             </button>
           ))}
-        <button type="button" className="ghost-button" onClick={onRemove}>
+        <button type="button" className="ghost-button" onClick={onRemove} title="Delete this candidate from the working session">
           Remove
         </button>
       </div>
@@ -372,9 +476,11 @@ function CandidateCard({
           decision={candidate.contactDecision}
           contacts={references.contacts}
           organizations={references.organizations}
-          onMatch={(contactAppId) => onPatch({ contactDecision: { type: "matched", contactAppId } })}
-          onIgnore={() => onPatch({ contactDecision: { type: "ignored" } })}
-          onReset={() => onPatch({ contactDecision: undefined })}
+          // contactCreated is reset with every decision made here, so a "Created Contact ✓" from an
+          // earlier Add Person can never outlive the decision it described (the routing panel does the same).
+          onMatch={(contactAppId) => onPatch({ contactDecision: { type: "matched", contactAppId }, contactCreated: false })}
+          onIgnore={() => onPatch({ contactDecision: { type: "ignored" }, contactCreated: false })}
+          onReset={() => onPatch({ contactDecision: undefined, contactCreated: false })}
           onAddPerson={onAddPerson}
         />
       )}

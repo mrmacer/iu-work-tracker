@@ -87,11 +87,18 @@ describe("No AI calls, no auto-creation from Intelligence, no fuzzy matching in 
     }
   });
 
-  it("Inbox/Voice Intelligence never call an Organization create/save function — matching stays read-only against references.organizations", () => {
-    const inbox = source("app/InboxIntelligence.tsx");
+  it("Inbox Intelligence never touches an Organization create/save function — matching stays read-only against references.organizations", () => {
+    expect(source("app/InboxIntelligence.tsx")).not.toMatch(/saveOrganization|updateOrganization/);
+  });
+
+  it("Voice Intelligence never CALLS an Organization create/save function itself — Patch 7.3 only passes the existing provider functions through to the reused OrganizationFormModal, where only an explicit human Save writes", () => {
     const voice = source("app/VoiceIntelligence.tsx");
-    expect(inbox).not.toMatch(/saveOrganization|updateOrganization/);
-    expect(voice).not.toMatch(/saveOrganization|updateOrganization/);
+    const panel = source("app/VoiceRoutingPanel.tsx");
+    for (const code of [voice, panel]) {
+      expect(code).not.toMatch(/\b(saveOrganization|updateOrganization|createOrganization)\s*\(/);
+    }
+    expect(panel).not.toMatch(/saveOrganization|updateOrganization/); // the panel never even receives them
+    expect(voice).toMatch(/<OrganizationFormModal/); // the one reviewed path
   });
 });
 

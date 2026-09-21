@@ -31,23 +31,14 @@ import { WORK_RECORD_SCHEMA_VERSION, type Contact, type Organization, type Proje
 import { selectContactProvider, type ContactProvider, type ContactResult } from "../lib/contact-provider";
 import { buildContactRelationshipSummary } from "../lib/contact-relationships";
 import {
-  buildOrganizationDraft,
-  normalizeOrganizationName,
-  ORGANIZATION_TYPES,
   selectOrganizationProvider,
-  validateOrganizationShape,
   type OrganizationProvider,
   type OrganizationResult,
-  type OrganizationTypeValue,
 } from "../lib/organization-provider";
 import {
-  buildProjectDraft,
-  PROJECT_STATUSES,
   selectProjectProvider,
-  validateProjectShape,
   type ProjectProvider,
   type ProjectResult,
-  type ProjectStatus,
 } from "../lib/project-provider";
 import { deriveReportingDays } from "../lib/reporting";
 import ContactFormModal, { CONTACT_STATUS_LABELS, emptyContactDraft } from "./ContactFormModal";
@@ -55,6 +46,8 @@ import ContactImport from "./ContactImport";
 import DevMicrosoftConnection from "./DevMicrosoftConnection";
 import InboxIntelligence from "./InboxIntelligence";
 import MeetingNotes from "./MeetingNotes";
+import OrganizationFormModal, { emptyOrganizationDraft, ORGANIZATION_TYPE_LABELS } from "./OrganizationFormModal";
+import ProjectFormModal, { emptyProjectDraft } from "./ProjectFormModal";
 import VoiceIntelligence from "./VoiceIntelligence";
 
 type View = "home" | "today" | "history" | "projects" | "contacts" | "organizations" | "orbit" | "inbox" | "voice" | "meeting";
@@ -639,6 +632,10 @@ export default function IUWorkTracker({
               references={effectiveReferences}
               saveContact={saveContact}
               updateContact={updateContact}
+              saveProject={saveProject}
+              updateProject={updateProject}
+              saveOrganization={saveOrganization}
+              updateOrganization={updateOrganization}
             />
           ) : (
             <MeetingNotes
@@ -1097,24 +1094,6 @@ function History({
     </div>
   );
 }
-// Cycled deterministically for new durable projects (see globals.css .project-mark.<color>) —
-// the create form deliberately has no color picker (not part of the Patch 7 spec), so every
-// new project keeps the exact same visual card design as the five seeded ones.
-const PROJECT_COLORS = ["blue", "coral", "lime", "purple", "yellow"] as const;
-
-function emptyProjectDraft(existingCount: number): Project {
-  return buildProjectDraft({
-    appId: crypto.randomUUID(),
-    name: "",
-    description: "",
-    status: "planning",
-    color: PROJECT_COLORS[existingCount % PROJECT_COLORS.length],
-    startDate: null,
-    targetDate: null,
-    stemOrbit: false,
-  });
-}
-
 function Projects({
   records,
   setView,
@@ -1203,148 +1182,6 @@ function Projects({
       )}
     </div>
   );
-}
-
-/**
- * A single compact overlay handles both Create and Edit — see docs/AI_HANDOFF.md "Durable
- * Projects (Patch 7)". Create vs. update is decided the same way every other durable resource
- * in this codebase decides it: `project.metadata.version > 0` means the project already has a
- * durable identity, so submitting routes through updateProject(); otherwise saveProject().
- * Updating a project never touches its connected Work Records — this component only ever
- * calls the Project provider.
- */
-function ProjectFormModal({
-  project,
-  onCancel,
-  onSaved,
-  saveProject,
-  updateProject,
-}: {
-  project: Project;
-  onCancel: () => void;
-  onSaved: () => void;
-  saveProject: (project: Project) => Promise<ProjectResult<Project>>;
-  updateProject: (project: Project, expectedVersion: number) => Promise<ProjectResult<Project>>;
-}) {
-  const [draft, setDraft] = useState<Project>(project);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const nameRef = useRef<HTMLInputElement>(null);
-  const isEditing = (draft.metadata?.version ?? 0) > 0;
-
-  useEffect(() => {
-    nameRef.current?.focus();
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
-
-  const patch = (change: Partial<Project>) => setDraft((current) => ({ ...current, ...change }));
-
-  const submit = async () => {
-    if (saving) return;
-    const shapeIssues = validateProjectShape(draft);
-    if (shapeIssues.length) {
-      setError(shapeIssues[0].message);
-      return;
-    }
-    setSaving(true);
-    setError("");
-    const result = isEditing ? await updateProject(draft, draft.metadata!.version) : await saveProject(draft);
-    setSaving(false);
-    if (result.status !== "success") {
-      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the project and try again.") : result.message);
-      return;
-    }
-    onSaved();
-  };
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="project-modal-title">
-        <header className="log-header">
-          <h2 id="project-modal-title">{isEditing ? "Edit Project" : "Create Project"}</h2>
-          <button onClick={onCancel} aria-label="Close">
-            ×
-          </button>
-        </header>
-        <div className="log-content">
-          <div className="form-stack">
-            <label>
-              <span>
-                Project name <b>*</b>
-              </span>
-              <input ref={nameRef} value={draft.name} onChange={(event) => patch({ name: event.target.value })} placeholder="e.g. STEM Ecosystem" />
-            </label>
-            <label>
-              <span>Description</span>
-              <textarea value={draft.description} onChange={(event) => patch({ description: event.target.value })} placeholder="A sentence is enough." rows={2} />
-            </label>
-            <label>
-              <span>Status</span>
-              <select value={draft.status} onChange={(event) => patch({ status: event.target.value as ProjectStatus })}>
-                {PROJECT_STATUSES.map((status) => (
-                  <option key={status} value={status}>
-                    {status[0].toUpperCase() + status.slice(1)}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <div className="form-two">
-              <label>
-                <span>Start date</span>
-                <input type="date" value={draft.startDate ?? ""} onChange={(event) => patch({ startDate: event.target.value || null })} />
-              </label>
-              <label>
-                <span>Target date</span>
-                <input type="date" value={draft.targetDate ?? ""} onChange={(event) => patch({ targetDate: event.target.value || null })} />
-              </label>
-            </div>
-            <div className="toggle-line">
-              <input
-                aria-label="STEM / ORBIT connection"
-                type="checkbox"
-                checked={draft.stemOrbit ?? false}
-                onChange={(event) => patch({ stemOrbit: event.target.checked })}
-              />
-              <span>
-                <strong>STEM / ORBIT connection</strong>
-                <small>Optional — does not classify any Work Record automatically.</small>
-              </span>
-            </div>
-          </div>
-        </div>
-        {error && (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="log-footer">
-          <button className="ghost-button" onClick={onCancel}>
-            Cancel
-          </button>
-          <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.name.trim()}>
-            {saving ? "Saving…" : isEditing ? "Save Changes" : "Create Project"}
-          </button>
-        </footer>
-      </section>
-    </div>
-  );
-}
-
-const ORGANIZATION_TYPE_LABELS: Record<OrganizationTypeValue, string> = {
-  district: "District",
-  partner: "Partner",
-  iu: "IU",
-};
-
-function emptyOrganizationDraft(): Organization {
-  return buildOrganizationDraft({ appId: crypto.randomUUID(), name: "", type: "partner" });
 }
 
 /**
@@ -1438,127 +1275,6 @@ function Organizations({
   );
 }
 
-/**
- * A single compact overlay handles both Create and Edit — mirrors ContactFormModal/
- * ProjectFormModal exactly. Duplicate detection is conservative and deterministic (trim +
- * collapse whitespace + lowercase, exact match only — never fuzzy): a name-only match is an
- * informational warning that never blocks Save, since Organization has no email field to serve
- * as a stronger signal.
- */
-function OrganizationFormModal({
-  organization,
-  organizations,
-  onCancel,
-  onSaved,
-  saveOrganization,
-  updateOrganization,
-}: {
-  organization: Organization;
-  organizations: Organization[];
-  onCancel: () => void;
-  onSaved: () => void;
-  saveOrganization: (organization: Organization) => Promise<OrganizationResult<Organization>>;
-  updateOrganization: (organization: Organization, expectedVersion: number) => Promise<OrganizationResult<Organization>>;
-}) {
-  const [draft, setDraft] = useState<Organization>(organization);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-  const nameRef = useRef<HTMLInputElement>(null);
-  const isEditing = (draft.metadata?.version ?? 0) > 0;
-
-  useEffect(() => {
-    nameRef.current?.focus();
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    };
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [onCancel]);
-
-  const patch = (change: Partial<Organization>) => setDraft((current) => ({ ...current, ...change }));
-
-  const otherOrganizations = organizations.filter((item) => item.appId !== draft.appId);
-  const nameDuplicate = draft.name.trim()
-    ? otherOrganizations.find((item) => normalizeOrganizationName(item.name) === normalizeOrganizationName(draft.name))
-    : undefined;
-
-  const submit = async () => {
-    if (saving) return;
-    const shapeIssues = validateOrganizationShape(draft);
-    if (shapeIssues.length) {
-      setError(shapeIssues[0].message);
-      return;
-    }
-    setSaving(true);
-    setError("");
-    const result = isEditing ? await updateOrganization(draft, draft.metadata!.version) : await saveOrganization(draft);
-    setSaving(false);
-    if (result.status !== "success") {
-      setError(result.status === "validation_error" ? (result.errors[0]?.message ?? "Check the organization and try again.") : result.message);
-      return;
-    }
-    onSaved();
-  };
-
-  return (
-    <div className="modal-backdrop" role="presentation">
-      <section className="project-modal" role="dialog" aria-modal="true" aria-labelledby="organization-modal-title">
-        <header className="log-header">
-          <h2 id="organization-modal-title">{isEditing ? "Edit Organization" : "Add Organization"}</h2>
-          <button onClick={onCancel} aria-label="Close">
-            ×
-          </button>
-        </header>
-        <div className="log-content">
-          <div className="form-stack">
-            <label>
-              <span>
-                Name <b>*</b>
-              </span>
-              <input
-                ref={nameRef}
-                value={draft.name}
-                onChange={(event) => patch({ name: event.target.value })}
-                placeholder="e.g. North Valley SD"
-              />
-            </label>
-            {nameDuplicate && (
-              <p className="muted-copy" role="status">
-                Another organization is already named &ldquo;{nameDuplicate.name}&rdquo;. This is just a heads up — Save is not blocked.
-              </p>
-            )}
-            <label>
-              <span>Type</span>
-              <select value={draft.type} onChange={(event) => patch({ type: event.target.value as OrganizationTypeValue })}>
-                {ORGANIZATION_TYPES.map((type) => (
-                  <option key={type} value={type}>
-                    {ORGANIZATION_TYPE_LABELS[type]}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </div>
-        </div>
-        {error && (
-          <div className="form-error" role="alert">
-            {error}
-          </div>
-        )}
-        <footer className="log-footer">
-          <button className="ghost-button" onClick={onCancel}>
-            Cancel
-          </button>
-          <button className="primary-action" onClick={() => void submit()} disabled={saving || !draft.name.trim()}>
-            {saving ? "Saving…" : isEditing ? "Save Changes" : "Add Organization"}
-          </button>
-        </footer>
-      </section>
-    </div>
-  );
-}
 
 /**
  * Patch 8B — Durable Contacts, identity/basic metadata. Patch 8C adds Contact Detail: opening a

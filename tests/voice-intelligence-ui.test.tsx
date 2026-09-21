@@ -40,6 +40,10 @@ function renderVoice() {
       references={REFERENCE_DATA}
       saveContact={vi.fn()}
       updateContact={vi.fn()}
+      saveProject={vi.fn()}
+      updateProject={vi.fn()}
+      saveOrganization={vi.fn()}
+      updateOrganization={vi.fn()}
     />,
   );
 }
@@ -130,7 +134,7 @@ describe("VoiceIntelligence — review and edit, zero persistence", () => {
     expect(screen.getByText("about an hour")).toBeTruthy();
     expect(screen.getByText("2 candidates")).toBeTruthy();
     expect(screen.getByText("2 selected")).toBeTruthy();
-    expect(screen.getByText("0 ignored")).toBeTruthy();
+    expect(screen.getByText("0 not selected")).toBeTruthy();
   });
 
   it("allows editing a candidate's title", async () => {
@@ -161,7 +165,7 @@ describe("VoiceIntelligence — review and edit, zero persistence", () => {
     const checkboxes = screen.getAllByRole("checkbox");
     await user.click(checkboxes[0]);
     expect(screen.getByText("1 selected")).toBeTruthy();
-    expect(screen.getByText("1 ignored")).toBeTruthy();
+    expect(screen.getByText("1 not selected")).toBeTruthy();
     await user.click(checkboxes[0]);
     expect(screen.getByText("2 selected")).toBeTruthy();
   });

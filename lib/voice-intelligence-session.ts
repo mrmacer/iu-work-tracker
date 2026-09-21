@@ -30,10 +30,33 @@ export type VoiceSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeI
  * saved from this candidate. `loggedWorkRecordAppId` is Voice-session UI state ONLY: it is never
  * written to a Work Record or SharePoint.
  */
+/**
+ * Patch 7.3 — the human's routing decision for an ORGANIZATION / DISTRICT / PROJECT candidate.
+ * `matched` links an EXISTING durable Organization/Project (by appId); `created` records the
+ * durable entity the human explicitly created from this candidate through the existing form;
+ * `ignored` means "not for this item". Session UI state only — never written to the entity.
+ */
+export type VoiceRoutingDecision =
+  // `entityName` is display-only: the entity's name at decision time, used when the entity is not
+  // (or no longer) in the current reference list — e.g. an in-memory Preview record after a refresh.
+  | { type: "matched"; entityAppId: string; entityName?: string }
+  | { type: "created"; entityAppId: string; entityName?: string }
+  | { type: "ignored" };
+
 export type VoiceReviewCandidate = VoiceCandidate & {
   id: string;
+  /**
+   * Patch 7.3 — CHECKBOX SEMANTICS: `selected` means "include this candidate in the current
+   * processing batch" (the Process selected tray). Unchecked candidates stay in the working
+   * session untouched, and are NOT processed right now — unchecking never deletes anything.
+   * Only "Remove" deletes a candidate.
+   */
   selected: boolean;
   contactDecision?: ContactMatchDecision;
+  /** PERSON only: the Contact behind a "matched" contactDecision was created here via Add Person. */
+  contactCreated?: boolean;
+  /** ORGANIZATION / DISTRICT / PROJECT only — see VoiceRoutingDecision. */
+  routing?: VoiceRoutingDecision;
   loggedWorkRecordAppId?: string | null;
 };
 
@@ -48,6 +71,8 @@ export type VoiceWorkingSessionV1 = {
   analyzed: boolean;
   candidates: VoiceReviewCandidate[];
   usage: VoiceSessionUsage | null;
+  /** Patch 7.3 — whether the "Process selected" panel is open (UI state, restored with the session). */
+  routingOpen?: boolean;
   savedAt: string;
 };
 
@@ -68,6 +93,14 @@ const StoredCandidateSchema = z.object({
       z.object({ type: z.literal("ignored") }),
     ])
     .optional(),
+  contactCreated: z.boolean().optional(),
+  routing: z
+    .union([
+      z.object({ type: z.literal("matched"), entityAppId: z.string().min(1), entityName: z.string().optional() }),
+      z.object({ type: z.literal("created"), entityAppId: z.string().min(1), entityName: z.string().optional() }),
+      z.object({ type: z.literal("ignored") }),
+    ])
+    .optional(),
   loggedWorkRecordAppId: z.string().nullable().optional(),
 });
 
@@ -80,6 +113,7 @@ const StoredSessionSchema = z.object({
   usage: z
     .object({ model: z.string(), inputTokens: z.number(), outputTokens: z.number() })
     .nullable(),
+  routingOpen: z.boolean().optional(),
   savedAt: z.string(),
 });
 
@@ -101,6 +135,7 @@ export function emptyVoiceSession(): VoiceWorkingSessionV1 {
     analyzed: false,
     candidates: [],
     usage: null,
+    routingOpen: false,
     savedAt: "",
   };
 }

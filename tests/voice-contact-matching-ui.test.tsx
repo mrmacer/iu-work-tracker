@@ -65,6 +65,10 @@ function renderVoice() {
       references={REFERENCE_DATA}
       saveContact={vi.fn()}
       updateContact={vi.fn()}
+      saveProject={vi.fn()}
+      updateProject={vi.fn()}
+      saveOrganization={vi.fn()}
+      updateOrganization={vi.fn()}
     />,
   );
 }
@@ -100,7 +104,7 @@ describe("Voice PERSON candidates get the shared Contact match panel", () => {
     const user = userEvent.setup();
     const saveContact = vi.fn();
     render(
-      <VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} references={REFERENCE_DATA} saveContact={saveContact} updateContact={vi.fn()} />,
+      <VoiceIntelligence openLog={vi.fn()} createDraftRecord={baseWorkRecord} references={REFERENCE_DATA} saveContact={saveContact} updateContact={vi.fn()} saveProject={vi.fn()} updateProject={vi.fn()} saveOrganization={vi.fn()} updateOrganization={vi.fn()} />,
     );
     await analyze(user, "Someone Unmatched");
     expect(screen.getByText("No reliable match found.")).toBeTruthy();
@@ -129,6 +133,10 @@ describe("Voice PERSON candidates get the shared Contact match panel", () => {
             return result;
           }}
           updateContact={(contact, version) => contactProvider.update(contact, version)}
+          saveProject={vi.fn()}
+          updateProject={vi.fn()}
+          saveOrganization={vi.fn()}
+          updateOrganization={vi.fn()}
         />
       );
     }

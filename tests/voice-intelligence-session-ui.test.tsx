@@ -91,6 +91,10 @@ function renderVoice(storage: VoiceSessionStorage | null, openLog = vi.fn()) {
         saveContact={vi.fn()}
         updateContact={vi.fn()}
         storage={storage}
+        saveProject={vi.fn()}
+        updateProject={vi.fn()}
+        saveOrganization={vi.fn()}
+        updateOrganization={vi.fn()}
       />,
     ),
   };
@@ -193,7 +197,7 @@ describe("restore — transcript and analysis survive unmount/remount", () => {
     const checkboxes = screen.getAllByRole("checkbox") as HTMLInputElement[];
     expect(checkboxes.map((box) => box.checked)).toEqual([true, false, true]);
     expect(screen.getByText("2 selected")).toBeTruthy();
-    expect(screen.getByText("1 ignored")).toBeTruthy();
+    expect(screen.getByText("1 not selected")).toBeTruthy();
     expect(screen.queryByText("about an hour")).toBeFalsy();
   });
 
