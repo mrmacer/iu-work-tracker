@@ -8,10 +8,44 @@ export const PROJECTS: Project[] = [
   { appId: "project-makerspace", name: "Makerspace", description: "Hands-on student and educator experiences.", status: "active", color: "yellow" },
 ];
 
+// Patch 9B — the real IU29 directory. Seeds live in code (they are NOT rows in IU_Organizations),
+// are read-only in the UI, and keep their appIds forever. District remains Organization.type ===
+// "district": there is no separate District model, provider, or list.
+//
+// The twelve districts are exactly the school districts IU29 itself lists on iu29.org (District
+// Announcements and Guest Teacher Program pages), spelled as IU29 and each district's own site
+// spell them (the district's site confirms "Saint Clair", not "St. Clair"). `org-iu` keeps its
+// original appId — existing records that link to it now read "Schuylkill Intermediate Unit 29".
+// PAIMS is a job-alike group within the Pennsylvania Association of Intermediate Units
+// (instructional media, educational technology, and IT), so it is a partner, not a district.
 export const ORGANIZATIONS: Organization[] = [
+  { appId: "org-iu", name: "Schuylkill Intermediate Unit 29", type: "iu" },
+  { appId: "org-blue-mountain", name: "Blue Mountain School District", type: "district" },
+  { appId: "org-mahanoy-area", name: "Mahanoy Area School District", type: "district" },
+  { appId: "org-minersville-area", name: "Minersville Area School District", type: "district" },
+  { appId: "org-north-schuylkill", name: "North Schuylkill School District", type: "district" },
+  { appId: "org-pine-grove-area", name: "Pine Grove Area School District", type: "district" },
+  { appId: "org-pottsville-area", name: "Pottsville Area School District", type: "district" },
+  { appId: "org-saint-clair-area", name: "Saint Clair Area School District", type: "district" },
+  { appId: "org-schuylkill-haven-area", name: "Schuylkill Haven Area School District", type: "district" },
+  { appId: "org-shenandoah-valley", name: "Shenandoah Valley School District", type: "district" },
+  { appId: "org-tamaqua-area", name: "Tamaqua Area School District", type: "district" },
+  { appId: "org-tri-valley", name: "Tri-Valley School District", type: "district" },
+  { appId: "org-williams-valley", name: "Williams Valley School District", type: "district" },
+  { appId: "org-paims", name: "PAIMS", type: "partner" },
+];
+
+/**
+ * Patch 9B — NON-SELECTABLE compatibility collection. These are the fictional development
+ * Organizations the app shipped with. They are retired from every picker, matcher, importer, and
+ * directory, but their appIds (and original names) are preserved so any Work Record, Contact, or
+ * Inbox Intelligence record that already references one still resolves, still reads correctly, and
+ * can still be edited. They are never silently remapped to a real district, and a NEW record can
+ * never select one (see lib/organization-directory.ts and lib/validation.ts).
+ */
+export const LEGACY_ORGANIZATIONS: Organization[] = [
   { appId: "org-north-valley", name: "North Valley SD", type: "district" },
   { appId: "org-riverbend", name: "Riverbend Area SD", type: "district" },
-  { appId: "org-iu", name: "Intermediate Unit", type: "iu" },
   { appId: "org-futureworks", name: "FutureWorks Partnership", type: "partner" },
 ];
 
@@ -61,6 +95,7 @@ export const SYSTEM_SETTINGS: SystemSettings = {
 export const REFERENCE_DATA: ReferenceData = {
   projects: PROJECTS,
   organizations: ORGANIZATIONS,
+  legacyOrganizations: LEGACY_ORGANIZATIONS,
   contacts: CONTACTS,
   categories: CATEGORIES,
   deliverables: DELIVERABLES,

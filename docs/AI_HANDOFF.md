@@ -488,6 +488,18 @@ Small usability patch. Core principle: **resolved is a status, not a dead end** 
 
 ---
 
+## IU29 District and Organization Cleanup (Patch 9B) — implemented, uncommitted (release gate pending)
+
+- **Seeds replaced** with the verified roster in `lib/reference-data.ts`: IU29 (`org-iu`, corrected name "Schuylkill Intermediate Unit 29"), 12 districts (full official "... School District" names, incl. "Saint Clair Area"), and PAIMS (`org-paims`, type `partner`). No separate District model. Details and ids: `docs/DATA_MODEL.md` → "IU29 directory (Patch 9B)".
+- **Historical safety**: the three fictional ids (`org-north-valley`, `org-riverbend`, `org-futureworks`) live in the NON-SELECTABLE `LEGACY_ORGANIZATIONS` / `ReferenceData.legacyOrganizations`. Old records still resolve names and remain editable; new records cannot select them (`retired_organization`). `validateWorkRecord(value, refs, { retainedLegacyOrganizationIds })`; Memory provider computes retained ids from the stored record; the Delegated SharePoint provider re-validates strictly against the stored record before writing, only when the record carries legacy ids. Log Work shows a record's own retired placeholders (labelled "(retired placeholder)") so they can be kept or deselected.
+- **Duplicates**: `lib/organization-directory.ts`. A durable Organization with the same normalized name as a seed replaces it in pickers; the seed id stays resolvable via the legacy set. Durable appIds are never changed.
+- **Matching tradeoff**: Inbox matching, Contact Import, and Voice routing remain exact-normalized-name. Old abbreviations such as "Blue Mountain SD" no longer match; only the full official name does.
+- **Sample data**: seed Contacts and sample Work Records keep the fictional placeholder ids so they can never be mistaken for real institutional relationships.
+- **Follow-up (not in 9B)**: abbreviation / alias matching (e.g. "Blue Mountain SD" → Blue Mountain School District) for Inbox matching, Contact Import, and Voice routing.
+- **Not touched**: auth, scopes, SharePoint schemas/codecs/providers' list definitions, AI processing.
+- **Live-data risk (unverified)**: no authorized live read of SharePoint was possible this patch. Before relying on cleanup, manually check `IU_Work_Records.OrganizationIdsJson`, `IU_Contacts` OrganizationAppId, `IU_Inbox_Intelligence` matched org/district ids for `org-north-valley` / `org-riverbend` / `org-futureworks` / `org-iu`, and list `IU_Organizations` for durable rows that duplicate the new names (handled by the shadowing rule, but worth knowing). Those records keep working either way.
+- Tests: `tests/iu29-directory.test.ts`, `tests/iu29-directory-ui.test.tsx` (plus updates to existing org/contact/voice/domain tests). Mutation-checked.
+
 ## Explicitly Out of Scope Unless Requested
 
 Do NOT independently begin:

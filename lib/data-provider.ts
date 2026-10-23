@@ -18,6 +18,7 @@ import {
   validateSharePointTextLimits,
   type SharePointWorkRecordConfig,
 } from "./sharepoint-work-records";
+import { mergeOrganizationDirectory } from "./organization-directory";
 import { validateWorkRecord, type ValidationIssue } from "./validation";
 
 export type ProviderResult<T> =
@@ -76,7 +77,15 @@ abstract class ReferenceProvider {
     this.references = { ...this.references, contacts: [...REFERENCE_DATA.contacts, ...durableContacts] };
   }
   setDurableOrganizations(durableOrganizations: Organization[]): void {
-    this.references = { ...this.references, organizations: [...REFERENCE_DATA.organizations, ...durableOrganizations] };
+    // Patch 9B: selectable = real seed directory + durable (a seed shadowed by a same-named durable
+    // Organization steps aside); legacy = retired placeholders + shadowed seeds, kept resolvable.
+    const directory = mergeOrganizationDirectory(REFERENCE_DATA.organizations, REFERENCE_DATA.legacyOrganizations ?? [], durableOrganizations);
+    this.references = { ...this.references, organizations: directory.selectable, legacyOrganizations: directory.legacy };
+  }
+  /** The retired-placeholder Organization IDs in `ids` (empty for nearly every record). */
+  protected legacyOrganizationIdsIn(ids: readonly string[]): string[] {
+    const legacy = new Set((this.references.legacyOrganizations ?? []).map((organization) => organization.appId));
+    return ids.filter((id) => legacy.has(id));
   }
   async getProjects() { return structuredClone(this.references.projects); }
   async getOrganizations() { return structuredClone(this.references.organizations); }
@@ -107,9 +116,11 @@ export class MemoryDataProvider extends ReferenceProvider implements DataProvide
     return { status: "success", value: structuredClone(saved) };
   }
   async updateWorkRecord(record: WorkRecord, expectedVersion: number): Promise<ProviderResult<WorkRecord>> {
-    const validated = validateWorkRecord(record, this.references);
-    if (!validated.valid) return { status: "validation_error", errors: validated.issues };
     const index = this.records.findIndex((item) => item.appId === record.appId);
+    // Patch 9B: an existing record keeps the retired placeholder Organizations it ALREADY has.
+    const retained = index >= 0 ? this.legacyOrganizationIdsIn(this.records[index].organizationIds) : [];
+    const validated = validateWorkRecord(record, this.references, { retainedLegacyOrganizationIds: retained });
+    if (!validated.valid) return { status: "validation_error", errors: validated.issues };
     if (index < 0) return { status: "persistence_error", message: "The record no longer exists." };
     const current = this.records[index];
     if (current.metadata.version !== expectedVersion) return { status: "conflict", current: structuredClone(current), message: "This record was changed after you opened it. Your draft is still available." };
@@ -184,7 +195,11 @@ export class DelegatedSharePointDataProvider extends ReferenceProvider implement
   }
 
   async updateWorkRecord(record: WorkRecord, expectedVersion: number): Promise<ProviderResult<WorkRecord>> {
-    const validated = validateWorkRecord(record, this.references);
+    // Patch 9B: validate permissively first (cheap, no network) — retired placeholder Organizations
+    // already on this record are tolerated — then, ONLY when the record carries any, confirm below
+    // against the STORED record that it really had them (a new selection is never allowed).
+    const legacyOnRecord = this.legacyOrganizationIdsIn(record.organizationIds);
+    const validated = validateWorkRecord(record, this.references, { retainedLegacyOrganizationIds: legacyOnRecord });
     if (!validated.valid) return { status: "validation_error", errors: validated.issues };
     const limitIssues = validateSharePointTextLimits(record);
     if (limitIssues.length) return { status: "validation_error", errors: limitIssues };
@@ -192,6 +207,12 @@ export class DelegatedSharePointDataProvider extends ReferenceProvider implement
       const token = await this.token();
       const resolved = await resolveWorkRecordItem(this.config, token, record);
       if (!resolved) return { status: "persistence_error", message: "The record no longer exists." };
+      if (legacyOnRecord.length) {
+        const strict = validateWorkRecord(record, this.references, {
+          retainedLegacyOrganizationIds: this.legacyOrganizationIdsIn(resolved.record.organizationIds),
+        });
+        if (!strict.valid) return { status: "validation_error", errors: strict.issues };
+      }
       if (resolved.record.metadata.version !== expectedVersion) {
         return {
           status: "conflict",

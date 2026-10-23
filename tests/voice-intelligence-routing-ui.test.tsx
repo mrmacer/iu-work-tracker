@@ -52,7 +52,7 @@ const ANALYSIS = {
       cand("COMPLETED_WORK", "Drafted the STEELS newsletter", "Finished the draft."), //            1
       cand("PERSON", "Development District Lead"), //                                               2 (seeded Contact)
       cand("PERSON", "Annie Milewski"), //                                                          3 (no match)
-      cand("ORGANIZATION", "FutureWorks Partnership"), //                                           4 (exact match)
+      cand("ORGANIZATION", "PAIMS"), //                                           4 (exact match)
       cand("DISTRICT", "Cedar Ridge SD"), //                                                        5 (no match)
       cand("PROJECT", "STEELS Implementation"), //                                                  6 (exact match)
       cand("PROJECT", "Brand New Initiative", "A fresh effort."), //                                7 (no match)
@@ -456,7 +456,7 @@ describe("Organization / District → the existing Organization path", () => {
     await selectOnly(user, [4, 5]);
     const p = await openPanel(user);
     const org = within(within(p).getByRole("region", { name: "Organization destination" }));
-    expect(org.getByText("FutureWorks Partnership", { selector: "span" })).toBeTruthy();
+    expect(org.getByText("PAIMS", { selector: "span" })).toBeTruthy();
     expect(org.getByRole("button", { name: "Match Existing" })).toBeTruthy();
     const district = within(within(p).getByRole("region", { name: "District destination" }));
     expect(district.getByText("No exact match found.")).toBeTruthy();
@@ -469,7 +469,7 @@ describe("Organization / District → the existing Organization path", () => {
     await selectOnly(user, [4]);
     const org = within(within(await openPanel(user)).getByRole("region", { name: "Organization destination" }));
     await user.click(org.getByRole("button", { name: "Match Existing" }));
-    expect(org.getByText("Matched Organization ✓: FutureWorks Partnership")).toBeTruthy();
+    expect(org.getByText("Matched Organization ✓: PAIMS")).toBeTruthy();
     expect(spies.saveOrganization).not.toHaveBeenCalled();
     const card = screen.getAllByLabelText("Candidate title")[4].closest(".candidate-card") as HTMLElement;
     expect(within(card).getByText("Matched Organization ✓")).toBeTruthy();
@@ -570,7 +570,7 @@ describe("session persistence of processing state, Clear, and boundaries", () =>
     await user.click(within(within(panel()).getByRole("region", { name: "Project destination" })).getByRole("button", { name: "Ignore" }));
     remount();
     expect(screen.getByRole("region", { name: "Process selected" })).toBeTruthy(); // panel reopened
-    expect(screen.getByText("Matched Organization ✓: FutureWorks Partnership")).toBeTruthy();
+    expect(screen.getByText("Matched Organization ✓: PAIMS")).toBeTruthy();
     expect(within(screen.getByRole("region", { name: "Project destination" })).getByText("Ignored for this item")).toBeTruthy();
     expect(screen.getByText("2 selected")).toBeTruthy();
   });

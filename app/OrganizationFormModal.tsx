@@ -112,7 +112,7 @@ export default function OrganizationFormModal({
                 ref={nameRef}
                 value={draft.name}
                 onChange={(event) => patch({ name: event.target.value })}
-                placeholder="e.g. North Valley SD"
+                placeholder="e.g. Gillingham Charter School"
               />
             </label>
             {nameDuplicate && (

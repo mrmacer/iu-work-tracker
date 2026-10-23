@@ -115,7 +115,14 @@ export type ReportingConfig = {
 export type SystemSettings = { activityTypes: readonly string[] };
 export type ReferenceData = {
   projects: Project[];
+  /** SELECTABLE Organizations (seed directory + durable). Every picker, matcher, importer, and directory uses this. */
   organizations: Organization[];
+  /**
+   * Patch 9B — retired placeholder Organizations (and seeds shadowed by a same-named durable
+   * Organization), kept ONLY so existing records that reference them still resolve and can still
+   * be edited. Never offered for new selection. See lib/organization-directory.ts.
+   */
+  legacyOrganizations?: Organization[];
   contacts: Contact[];
   categories: Category[];
   deliverables: Deliverable[];

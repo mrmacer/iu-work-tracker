@@ -50,6 +50,7 @@ export default function ContactFormModal({
   contact,
   contacts,
   organizations,
+  legacyOrganizations = [],
   onCancel,
   onSaved,
   saveContact,
@@ -58,6 +59,8 @@ export default function ContactFormModal({
   contact: Contact;
   contacts: Contact[];
   organizations: Organization[];
+  /** Retired placeholder Organizations: offered ONLY if this contact already points at one, so it is not silently lost on save. */
+  legacyOrganizations?: Organization[];
   onCancel: () => void;
   onSaved: (savedContact: Contact) => void;
   saveContact: (contact: Contact) => Promise<ContactResult<Contact>>;
@@ -161,6 +164,13 @@ export default function ContactFormModal({
                     {org.name}
                   </option>
                 ))}
+                {legacyOrganizations
+                  .filter((org) => org.appId === draft.organizationId)
+                  .map((org) => (
+                    <option key={org.appId} value={org.appId}>
+                      {org.name} (retired placeholder)
+                    </option>
+                  ))}
               </select>
             </label>
             <label>

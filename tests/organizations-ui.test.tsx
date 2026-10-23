@@ -52,36 +52,70 @@ async function addOrganizationFromScreen(user: ReturnType<typeof userEvent.setup
   await openOrganizations(user);
   await user.click(screen.getByRole("button", { name: "Add Organization" }));
   const dialog = await screen.findByRole("dialog");
-  await user.type(within(dialog).getByPlaceholderText(/north valley sd/i), fields.name);
+  await user.type(within(dialog).getByPlaceholderText(/gillingham charter school/i), fields.name);
   if (fields.type) await user.selectOptions(within(dialog).getByRole("combobox"), fields.type);
   await user.click(within(dialog).getByRole("button", { name: "Add Organization" }));
   await waitFor(() => expect(screen.queryByRole("dialog")).toBeFalsy());
 }
 
-describe("Legacy seeded organizations (regression)", () => {
-  it("still render before any durable organization exists", async () => {
+const IU29_DISTRICTS = [
+  "Blue Mountain School District",
+  "Mahanoy Area School District",
+  "Minersville Area School District",
+  "North Schuylkill School District",
+  "Pine Grove Area School District",
+  "Pottsville Area School District",
+  "Saint Clair Area School District",
+  "Schuylkill Haven Area School District",
+  "Shenandoah Valley School District",
+  "Tamaqua Area School District",
+  "Tri-Valley School District",
+  "Williams Valley School District",
+];
+const RETIRED_PLACEHOLDERS = ["North Valley SD", "Riverbend Area SD", "FutureWorks Partnership"];
+
+describe("Seeded IU29 directory (Patch 9B)", () => {
+  it("shows the twelve real IU29 districts, Schuylkill Intermediate Unit 29, and PAIMS — fourteen seeded Organizations", async () => {
     const user = userEvent.setup();
     renderApp();
     await openOrganizations(user);
-    for (const name of ["North Valley SD", "Riverbend Area SD", "Intermediate Unit", "FutureWorks Partnership"]) {
+    for (const name of [...IU29_DISTRICTS, "Schuylkill Intermediate Unit 29", "PAIMS"]) {
       expect(await screen.findByText(name)).toBeTruthy();
     }
-    expect(screen.getAllByRole("article")).toHaveLength(4);
+    expect(screen.getAllByRole("article")).toHaveLength(14);
   });
 
-  it("shows no duplicate cards after a durable organization is created — four seeded plus exactly one new", async () => {
+  it("never shows the retired placeholder Organizations in the directory", async () => {
     const user = userEvent.setup();
     renderApp();
-    await addOrganizationFromScreen(user, { name: "Schuylkill Haven SD", type: "district" });
-    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(5));
-    expect(screen.getAllByText("Schuylkill Haven SD")).toHaveLength(1);
+    await openOrganizations(user);
+    await screen.findByText("PAIMS");
+    for (const name of [...RETIRED_PLACEHOLDERS, "Intermediate Unit"]) expect(screen.queryByText(name)).toBeFalsy();
+  });
+
+  it("types are right: districts are District, PAIMS is a Partner (not a district), the IU is IU", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await openOrganizations(user);
+    const chip = async (name: string) => within((await screen.findByText(name)).closest("article")!).getByText(/^(District|Partner|IU)$/).textContent;
+    expect(await chip("Blue Mountain School District")).toBe("District");
+    expect(await chip("PAIMS")).toBe("Partner");
+    expect(await chip("Schuylkill Intermediate Unit 29")).toBe("IU");
+  });
+
+  it("shows no duplicate cards after a durable organization is created — fourteen seeded plus exactly one new", async () => {
+    const user = userEvent.setup();
+    renderApp();
+    await addOrganizationFromScreen(user, { name: "Gillingham Charter School", type: "partner" });
+    await waitFor(() => expect(screen.getAllByRole("article")).toHaveLength(15));
+    expect(screen.getAllByText("Gillingham Charter School")).toHaveLength(1);
   });
 
   it("a seed organization has no Edit button — read-only", async () => {
     const user = userEvent.setup();
     renderApp();
     await openOrganizations(user);
-    const card = (await screen.findByText("North Valley SD")).closest("article")!;
+    const card = (await screen.findByText("Blue Mountain School District")).closest("article")!;
     expect(within(card).queryByRole("button", { name: "Edit" })).toBeFalsy();
   });
 });
@@ -94,7 +128,7 @@ describe("Add Organization", () => {
     await user.click(screen.getByRole("button", { name: "Add Organization" }));
     const dialog = await screen.findByRole("dialog");
     expect(within(dialog).getByRole("heading", { name: "Add Organization" })).toBeTruthy();
-    expect(within(dialog).getByPlaceholderText(/north valley sd/i)).toBeTruthy();
+    expect(within(dialog).getByPlaceholderText(/gillingham charter school/i)).toBeTruthy();
     expect(within(dialog).getByRole("combobox")).toBeTruthy();
     expect(within(dialog).queryByText(/notes/i)).toBeFalsy(); // no Notes field in Patch 8E
   });
@@ -145,12 +179,17 @@ describe("Duplicate-name warning", () => {
     await openOrganizations(user);
     await user.click(screen.getByRole("button", { name: "Add Organization" }));
     const dialog = await screen.findByRole("dialog");
-    // "north valley sd" normalizes identically to the seeded "North Valley SD".
-    await user.type(within(dialog).getByPlaceholderText(/north valley sd/i), "  NORTH   VALLEY sd  ");
+    // "blue mountain school district" normalizes identically to the seeded "Blue Mountain School District".
+    await user.type(within(dialog).getByPlaceholderText(/gillingham charter school/i), "  BLUE   MOUNTAIN school district  ");
     expect((await within(dialog).findByRole("status")).textContent).toMatch(/already named/i);
     await user.click(within(dialog).getByRole("button", { name: "Add Organization" }));
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeFalsy()); // single click — never blocked
-    expect(screen.getAllByRole("article")).toHaveLength(5);
+    // Patch 9B: the durable record REPLACES the same-named seed in the directory — no duplicate card.
+    expect(screen.getAllByRole("article")).toHaveLength(14);
+    expect(screen.getAllByText(/blue\s+mountain school district/i)).toHaveLength(1);
+    expect(screen.queryByText("Blue Mountain School District")).toBeFalsy(); // the seed spelling stepped aside…
+    const card = screen.getByText(/blue\s+mountain school district/i).closest("article")!;
+    expect(within(card).getByRole("button", { name: "Edit" })).toBeTruthy(); // …for the durable (editable) one
   });
 });
 
@@ -159,9 +198,9 @@ describe("Search", () => {
     const user = userEvent.setup();
     renderApp();
     await openOrganizations(user);
-    await user.type(screen.getByRole("textbox", { name: /search organizations/i }), "futureworks");
-    expect(screen.getByText("FutureWorks Partnership")).toBeTruthy();
-    expect(screen.queryByText("North Valley SD")).toBeFalsy();
+    await user.type(screen.getByRole("textbox", { name: /search organizations/i }), "paims");
+    expect(screen.getByText("PAIMS")).toBeTruthy();
+    expect(screen.queryByText("Blue Mountain School District")).toBeFalsy();
   });
 
   it("filters by type label", async () => {
@@ -169,10 +208,10 @@ describe("Search", () => {
     renderApp();
     await openOrganizations(user);
     await user.type(screen.getByRole("textbox", { name: /search organizations/i }), "district");
-    expect(screen.getByText("North Valley SD")).toBeTruthy();
-    expect(screen.getByText("Riverbend Area SD")).toBeTruthy();
-    expect(screen.queryByText("Intermediate Unit")).toBeFalsy();
-    expect(screen.queryByText("FutureWorks Partnership")).toBeFalsy();
+    expect(screen.getByText("Blue Mountain School District")).toBeTruthy();
+    expect(screen.getByText("Williams Valley School District")).toBeTruthy();
+    expect(screen.queryByText("Schuylkill Intermediate Unit 29")).toBeFalsy();
+    expect(screen.queryByText("PAIMS")).toBeFalsy();
   });
 });
 

@@ -18,6 +18,7 @@ import {
 } from "../lib/inbox-intelligence-models";
 import type { InboxIntelligenceResult } from "../lib/inbox-intelligence-provider";
 import type { Contact, ReferenceData, WorkRecord } from "../lib/models";
+import { organizationsForLookup } from "../lib/organization-directory";
 
 type Phase = "paste" | "review" | "saved";
 
@@ -400,7 +401,7 @@ export default function InboxIntelligence({
                       candidates={matchContactCandidates(personName, references.contacts, { organizationIds: organizationContext })}
                       decision={personDecisions[personName]}
                       contacts={references.contacts}
-                      organizations={references.organizations}
+                      organizations={organizationsForLookup(references)}
                       onMatch={(contactAppId) => decideMatch(personName, contactAppId)}
                       onIgnore={() => decideIgnore(personName)}
                       onReset={() => resetDecision(personName)}
@@ -753,9 +754,9 @@ function InboxRow({
     ? references.projects.find((project) => project.appId === record.matchedProjectIds[0])?.name
     : null;
   const relatedOrg = record.matchedDistrictIds[0]
-    ? references.organizations.find((org) => org.appId === record.matchedDistrictIds[0])?.name
+    ? organizationsForLookup(references).find((org) => org.appId === record.matchedDistrictIds[0])?.name
     : record.matchedOrganizationIds[0]
-      ? references.organizations.find((org) => org.appId === record.matchedOrganizationIds[0])?.name
+      ? organizationsForLookup(references).find((org) => org.appId === record.matchedOrganizationIds[0])?.name
       : null;
   // Patch 8D — read-only display of the human-reviewed Contact matches from Save time. There is
   // no post-save re-review UI, matching the existing Organization/District/Project precedent

@@ -34,7 +34,16 @@ function nonNegativeInteger(issues: ValidationIssue[], path: string, value: unkn
   if (!Number.isInteger(value) || Number(value) < 0) issue(issues, path, "invalid_number", `${path} must be a non-negative whole number.`);
 }
 
-export function validateWorkRecord(value: unknown, references: ReferenceData): ValidationResult {
+export type ValidateWorkRecordOptions = {
+  /**
+   * Patch 9B — legacy (retired placeholder) Organization IDs the record being validated ALREADY
+   * references in its stored form. Those stay valid so an existing record can still be edited; any
+   * other legacy ID is rejected, so a NEW selection of a retired Organization is impossible.
+   */
+  retainedLegacyOrganizationIds?: Iterable<string>;
+};
+
+export function validateWorkRecord(value: unknown, references: ReferenceData, options: ValidateWorkRecordOptions = {}): ValidationResult {
   const issues: ValidationIssue[] = [];
   if (!value || typeof value !== "object" || Array.isArray(value)) {
     return { valid: false, issues: [{ path: "record", code: "invalid_record", message: "Record must be an object." }] };
@@ -53,13 +62,26 @@ export function validateWorkRecord(value: unknown, references: ReferenceData): V
   if (!scopes.has(record.engagementScope)) issue(issues, "engagementScope", "invalid_scope", "engagementScope is invalid.");
 
   const projectIds = validateIdArray(issues, "projectIds", record.projectIds, new Set(references.projects.map((item) => item.appId)));
-  const organizationIds = validateIdArray(issues, "organizationIds", record.organizationIds, new Set(references.organizations.map((item) => item.appId)));
+  const legacyOrganizations = references.legacyOrganizations ?? [];
+  const retainedLegacy = new Set(options.retainedLegacyOrganizationIds ?? []);
+  const organizationIds = validateIdArray(
+    issues,
+    "organizationIds",
+    record.organizationIds,
+    new Set([...references.organizations, ...legacyOrganizations].map((item) => item.appId)),
+  );
+  // A retired placeholder Organization is valid only where the stored record already had it.
+  for (const legacy of legacyOrganizations) {
+    if (organizationIds.includes(legacy.appId) && !retainedLegacy.has(legacy.appId)) {
+      issue(issues, "organizationIds", "retired_organization", `${legacy.name} is a retired placeholder organization and cannot be selected for a new entry.`);
+    }
+  }
   validateIdArray(issues, "contactIds", record.contactIds, new Set(references.contacts.map((item) => item.appId)));
   validateIdArray(issues, "categoryIds", record.categoryIds, new Set(references.categories.map((item) => item.appId)));
   validateIdArray(issues, "evidenceReferenceIds", record.evidenceReferenceIds, null);
   void projectIds;
 
-  const districtIds = new Set(references.organizations.filter((item) => item.type === "district").map((item) => item.appId));
+  const districtIds = new Set([...references.organizations, ...legacyOrganizations].filter((item) => item.type === "district").map((item) => item.appId));
   const selectedDistricts = organizationIds.filter((id) => districtIds.has(id));
   if (record.engagementScope === "specific" && selectedDistricts.length === 0) issue(issues, "engagementScope", "scope_requires_district", "Specific scope requires at least one canonical district.");
   if (record.engagementScope !== "specific" && selectedDistricts.length > 0) issue(issues, "organizationIds", "scope_district_mismatch", "District IDs are only valid with specific scope.");

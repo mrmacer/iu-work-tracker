@@ -57,7 +57,7 @@ describe("reporting calculations", () => {
 describe("work record validation", () => {
   it.each<[EngagementScope, string[]]>([
     ["none", []],
-    ["specific", ["org-north-valley"]],
+    ["specific", ["org-blue-mountain"]],
     ["regional", []],
     ["allDistricts", []],
   ])("accepts %s engagement scope", (engagementScope, organizationIds) => {
@@ -65,7 +65,7 @@ describe("work record validation", () => {
   });
   it("rejects scope and district mismatches", () => {
     expect(validateWorkRecord(newRecord({ engagementScope: "specific" }), REFERENCE_DATA).valid).toBe(false);
-    expect(validateWorkRecord(newRecord({ engagementScope: "regional", organizationIds: ["org-riverbend"] }), REFERENCE_DATA).valid).toBe(false);
+    expect(validateWorkRecord(newRecord({ engagementScope: "regional", organizationIds: ["org-mahanoy-area"] }), REFERENCE_DATA).valid).toBe(false);
   });
   it("requires a primary deliverable only for reportable work", () => {
     expect(validateWorkRecord(newRecord(), REFERENCE_DATA).valid).toBe(true);

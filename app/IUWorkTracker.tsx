@@ -42,6 +42,8 @@ import {
 } from "../lib/project-provider";
 import { createBrowserMicrosoftAuthController, isSignInRequiredMessage } from "../lib/microsoft-auth";
 import { readDevMicrosoftConfig } from "../lib/microsoft-auth-config";
+import { legacyOrganizationsReferencedBy, mergeOrganizationDirectory, organizationsForLookup } from "../lib/organization-directory";
+import { LEGACY_ORGANIZATIONS, REFERENCE_DATA } from "../lib/reference-data";
 import {
   initialStorageNotice,
   inspectCurrentMicrosoftSession,
@@ -99,6 +101,8 @@ const niceDate = (date: string) =>
   }).format(new Date(`${date}T12:00:00`));
 const entityName = (items: { appId: string; name: string }[], id: string) =>
   items.find((item) => item.appId === id)?.name ?? "Unassigned";
+const isLegacyOrganization = (references: Pick<ReferenceData, "legacyOrganizations">, id: string) =>
+  (references.legacyOrganizations ?? []).some((organization) => organization.appId === id);
 
 function emptyRecord(): WorkRecord {
   return {
@@ -403,9 +407,16 @@ export default function IUWorkTracker({
   }, [organizationRecords]);
   const allProjects: Project[] = references ? [...references.projects, ...projectRecords] : projectRecords;
   const allContacts: Contact[] = references ? [...references.contacts, ...contactRecords] : contactRecords;
-  const allOrganizations: Organization[] = references ? [...references.organizations, ...organizationRecords] : organizationRecords;
+  // Patch 9B: the SELECTABLE directory (real IU29 seeds + durable) and the non-selectable
+  // compatibility collection (retired placeholders, plus any seed a same-named durable Organization
+  // replaces). Seeds always come from the code-level directory, never from provider state, so the
+  // legacy side is complete however the provider has merged durable records.
+  const organizationDirectory = references
+    ? mergeOrganizationDirectory(REFERENCE_DATA.organizations, LEGACY_ORGANIZATIONS, organizationRecords)
+    : { selectable: organizationRecords, legacy: [] as Organization[] };
+  const allOrganizations: Organization[] = organizationDirectory.selectable;
   const effectiveReferences: ReferenceData | null = references
-    ? { ...references, projects: allProjects, contacts: allContacts, organizations: allOrganizations }
+    ? { ...references, projects: allProjects, contacts: allContacts, organizations: allOrganizations, legacyOrganizations: organizationDirectory.legacy }
     : null;
   const saveInboxRecord = async (record: InboxIntelligenceRecord): Promise<InboxIntelligenceResult<InboxIntelligenceRecord>> => {
     const active = inboxProvider.current;
@@ -776,6 +787,7 @@ export default function IUWorkTracker({
             <Contacts
               contacts={allContacts}
               organizations={effectiveReferences.organizations}
+              legacyOrganizations={effectiveReferences.legacyOrganizations ?? []}
               projects={allProjects}
               records={records}
               loadFailed={contactLoadFailed}
@@ -1004,7 +1016,7 @@ function Home({
                   key={record.appId}
                   record={record}
                   onClick={() => openLog(record)}
-                  organizations={references.organizations}
+                  organizations={organizationsForLookup(references)}
                 />
               ))
             ) : (
@@ -1156,7 +1168,7 @@ function Today({
                 key={record.appId}
                 record={record}
                 onClick={() => openLog(record)}
-                organizations={references.organizations}
+                organizations={organizationsForLookup(references)}
               />
             ))
           ) : (
@@ -1247,7 +1259,7 @@ function History({
               </strong>
               <small>
                 {record.organizationIds[0]
-                  ? entityName(references.organizations, record.organizationIds[0])
+                  ? entityName(organizationsForLookup(references), record.organizationIds[0])
                   : record.engagementScope === "regional"
                     ? "Regional scope"
                     : record.engagementScope === "allDistricts"
@@ -1472,6 +1484,7 @@ function Organizations({
 function Contacts({
   contacts,
   organizations,
+  legacyOrganizations,
   projects,
   records,
   loadFailed,
@@ -1481,6 +1494,8 @@ function Contacts({
 }: {
   contacts: Contact[];
   organizations: Organization[];
+  /** Retired placeholder Organizations — resolve names of existing contacts only; never selectable for a new link. */
+  legacyOrganizations: Organization[];
   projects: Project[];
   records: WorkRecord[];
   loadFailed: boolean;
@@ -1495,7 +1510,7 @@ function Contacts({
   const [showImport, setShowImport] = useState(false);
 
   const organizationName = (id: string | null) =>
-    id ? (organizations.find((org) => org.appId === id)?.name ?? "Unknown organization") : "";
+    id ? ([...organizations, ...legacyOrganizations].find((org) => org.appId === id)?.name ?? "Unknown organization") : "";
 
   if (showImport) {
     return (
@@ -1602,6 +1617,7 @@ function Contacts({
           contact={modalContact}
           contacts={contacts}
           organizations={organizations}
+          legacyOrganizations={legacyOrganizations}
           onCancel={() => setModalContact(null)}
           onSaved={() => setModalContact(null)}
           saveContact={saveContact}
@@ -2026,7 +2042,7 @@ function LogWizard({
                       className={record.engagementScope === value ? "selected" : ""}
                       aria-pressed={record.engagementScope === value}
                       onClick={() => {
-                        const districtIds = new Set(references.organizations.filter((item) => item.type === "district").map((item) => item.appId));
+                        const districtIds = new Set(organizationsForLookup(references).filter((item) => item.type === "district").map((item) => item.appId));
                         patch({
                           engagementScope: value as WorkRecord["engagementScope"],
                           organizationIds: value === "specific" ? record.organizationIds : record.organizationIds.filter((id) => !districtIds.has(id)),
@@ -2042,22 +2058,30 @@ function LogWizard({
                 <fieldset>
                   <legend>District(s) <small>select one or more</small></legend>
                   <div className="choice-grid">
-                    {references.organizations.filter((item) => item.type === "district").map((item) => (
-                      <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
-                        <span>▦</span>{item.name}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
-                      </button>
-                    ))}
+                    {[
+                      ...references.organizations,
+                      // A retired placeholder shows only while this record still has it, so it can be seen and deselected.
+                      ...legacyOrganizationsReferencedBy(record.organizationIds, references),
+                    ]
+                      .filter((item) => item.type === "district")
+                      .map((item) => (
+                        <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
+                          <span>▦</span>{item.name}{isLegacyOrganization(references, item.appId) ? " (retired placeholder)" : ""}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
+                        </button>
+                      ))}
                   </div>
                 </fieldset>
               )}
               <fieldset>
                 <legend>Organization / partner <small>optional</small></legend>
                 <div className="choice-grid">
-                  {references.organizations.filter((item) => item.type !== "district").map((item) => (
-                    <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
-                      <span>{item.type === "partner" ? "◇" : "○"}</span>{item.name}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
-                    </button>
-                  ))}
+                  {[...references.organizations, ...legacyOrganizationsReferencedBy(record.organizationIds, references)]
+                    .filter((item) => item.type !== "district")
+                    .map((item) => (
+                      <button type="button" key={item.appId} className={record.organizationIds.includes(item.appId) ? "selected" : ""} onClick={() => toggle("organizationIds", item.appId)}>
+                        <span>{item.type === "partner" ? "◇" : "○"}</span>{item.name}{isLegacyOrganization(references, item.appId) ? " (retired placeholder)" : ""}<i>{record.organizationIds.includes(item.appId) ? "✓" : ""}</i>
+                      </button>
+                    ))}
                 </div>
               </fieldset>
               <fieldset>

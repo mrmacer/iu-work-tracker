@@ -3,6 +3,7 @@
 import { useRef, useState } from "react";
 import type { AnalyzeTranscriptResult } from "../lib/anthropic-voice-analysis";
 import type { Contact, Organization, Project, ReferenceData, WorkRecord } from "../lib/models";
+import { organizationsForLookup } from "../lib/organization-directory";
 import { MAX_TRANSCRIPT_LENGTH } from "../lib/voice-intelligence-config";
 import {
   VOICE_CANDIDATE_TYPES,
@@ -475,7 +476,7 @@ function CandidateCard({
           candidates={matchContactCandidates(candidate.title, references.contacts)}
           decision={candidate.contactDecision}
           contacts={references.contacts}
-          organizations={references.organizations}
+          organizations={organizationsForLookup(references)}
           // contactCreated is reset with every decision made here, so a "Created Contact ✓" from an
           // earlier Add Person can never outlive the decision it described (the routing panel does the same).
           onMatch={(contactAppId) => onPatch({ contactDecision: { type: "matched", contactAppId }, contactCreated: false })}

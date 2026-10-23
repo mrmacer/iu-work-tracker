@@ -19,6 +19,7 @@ import {
   type VoiceCandidateGroup,
 } from "../lib/voice-routing";
 import type { VoiceReviewCandidate } from "../lib/voice-intelligence-session";
+import { organizationsForLookup } from "../lib/organization-directory";
 import ContactMatchPanel from "./ContactMatchPanel";
 
 type RoutingPatch = Partial<Pick<VoiceReviewCandidate, "contactDecision" | "contactCreated" | "routing">>;
@@ -90,7 +91,7 @@ export default function VoiceRoutingPanel({
                     candidates={matchContactCandidates(candidate.title, references.contacts)}
                     decision={candidate.contactDecision}
                     contacts={references.contacts}
-                    organizations={references.organizations}
+                    organizations={organizationsForLookup(references)}
                     onMatch={(contactAppId) => onPatch(candidate.id, { contactDecision: { type: "matched", contactAppId }, contactCreated: false })}
                     onIgnore={() => onPatch(candidate.id, { contactDecision: { type: "ignored" }, contactCreated: false })}
                     onReset={() => onPatch(candidate.id, { contactDecision: undefined, contactCreated: false })}

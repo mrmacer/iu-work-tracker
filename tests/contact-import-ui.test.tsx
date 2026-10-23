@@ -85,7 +85,7 @@ describe("File selection and parsing", () => {
     const user = userEvent.setup();
     renderApp();
     await openImport(user);
-    await uploadCsv(user, "Full Name,Email,Role,Organization\nJordan Example,jordan@example.test,Coordinator,Intermediate Unit\nTaylor Example,,Teacher,North Valley SD");
+    await uploadCsv(user, "Full Name,Email,Role,Organization\nJordan Example,jordan@example.test,Coordinator,Schuylkill Intermediate Unit 29\nTaylor Example,,Teacher,Blue Mountain School District");
     expect((await screen.findAllByText("Jordan Example")).length).toBeGreaterThan(0);
     expect(screen.getAllByText("Taylor Example").length).toBeGreaterThan(0);
     expect(screen.getByText(/roster\.csv/)).toBeTruthy();
@@ -114,8 +114,8 @@ describe("Candidate display", () => {
     const user = userEvent.setup();
     renderApp();
     await openImport(user);
-    await uploadCsv(user, "Name,Organization\nTaylor Example,North Valley SD");
-    expect(await screen.findByText(/Organization: North Valley SD → North Valley SD/)).toBeTruthy();
+    await uploadCsv(user, "Name,Organization\nTaylor Example,Blue Mountain School District");
+    expect(await screen.findByText(/Organization: Blue Mountain School District → Blue Mountain School District/)).toBeTruthy();
   });
 
   it("shows the Organization text as unresolved when it doesn't match any existing Organization", async () => {
@@ -173,7 +173,7 @@ describe("Create New", () => {
     const user = userEvent.setup();
     renderApp();
     await openImport(user);
-    await uploadCsv(user, "Name,Email,Role,Organization,Phone\nJordan Example,jordan@example.test,Coordinator,Intermediate Unit,555-0100");
+    await uploadCsv(user, "Name,Email,Role,Organization,Phone\nJordan Example,jordan@example.test,Coordinator,Schuylkill Intermediate Unit 29,555-0100");
     await screen.findAllByText("Jordan Example");
     await user.click(screen.getByRole("button", { name: "Add Person" }));
     const dialog = await screen.findByRole("dialog");
