@@ -69,7 +69,7 @@ For each active origin, the MSAL values are:
 | Authority | `https://login.microsoftonline.com/3276761c-22db-462b-a930-172d155bd795` |
 | Redirect URI | `<current origin>/` |
 | Post-logout redirect URI | `<current origin>/` |
-| Cache | Browser `sessionStorage` through MSAL |
+| Cache | Browser `localStorage` through MSAL (Patch 9A — originally `sessionStorage`; see `docs/DELEGATED_AUTH_SETUP.md` §13) |
 
 This resolves to the registered URLs `http://localhost:3000/` locally and `https://iu-work-tracker.gmacer.chatgpt.site/` on the owner-only deployed DEV site.
 
@@ -89,13 +89,13 @@ Sites.ReadWrite.All
 1. MSAL initializes and processes any authorization redirect response.
 2. A redirect-returned account becomes active.
 3. If there is no redirect result, MSAL restores the active account or the sole cached account.
-4. If multiple accounts are cached and none is active, the implementation does not choose one implicitly.
+4. If multiple accounts are cached and none is active, the implementation does not choose one implicitly (Patch 9A: the UI now says so and asks the human to choose).
 5. The user starts sign-in with `loginRedirect` and Microsoft's account selector.
 6. Graph token acquisition first uses `acquireTokenSilent` for the selected account and exact scopes.
-7. Only an MSAL `InteractionRequiredAuthError` triggers `acquireTokenRedirect`.
+7. An MSAL `InteractionRequiredAuthError` raises `InteractionRequiredError` — **Patch 9A: no redirect starts automatically**; the user's explicit "Sign in with Microsoft" click starts a single, shared `acquireTokenRedirect` (originally this step redirected automatically).
 8. Sign-out uses `logoutRedirect` with the active account and current-origin post-logout URI.
 
-MSAL persists authentication state in `sessionStorage`, allowing restoration after reload in the same browser tab/session. MSAL manages cached token renewal; the application does not store, inspect, log, or manually refresh tokens.
+**Patch 9A:** MSAL persists authentication state in its encrypted `localStorage` cache, allowing restoration after a reload, in a new tab, and after a tab is closed, for the life of the browser session (the cache key is a session cookie, so a full browser restart means signing in again). *Originally this report recorded `sessionStorage` (same-tab only).* MSAL manages cached token renewal; the application does not store, inspect, log, or manually refresh tokens.
 
 ## Microsoft Graph calls
 

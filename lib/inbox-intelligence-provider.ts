@@ -1,8 +1,7 @@
 import type { AccountInfo } from "@azure/msal-browser";
 import {
   createBrowserMicrosoftAuthController,
-  InteractiveRedirectStartedError,
-  MicrosoftAuthenticationError,
+  microsoftAuthErrorMessage,
   type MicrosoftAuthController,
 } from "./microsoft-auth";
 import { readDevMicrosoftConfig } from "./microsoft-auth-config";
@@ -148,22 +147,14 @@ export class DelegatedSharePointInboxIntelligenceProvider implements InboxIntell
   }
 
   private toErrorResult<T>(error: unknown): InboxIntelligenceResult<T> {
-    if (error instanceof InteractiveRedirectStartedError) {
-      return { status: "network_error", message: "Microsoft sign-in confirmation is required. Finish signing in, then try again." };
-    }
+    // Patch 9A — every Microsoft authentication problem (expired sign-in, failed token, redirect
+    // pending) reports its own useful message instead of collapsing into the generic fallback.
+    const authMessage = microsoftAuthErrorMessage(error);
+    if (authMessage) return { status: "network_error", message: authMessage };
     if (error instanceof SharePointInboxIntelligenceError) {
       return error.kind === "auth"
         ? { status: "network_error", message: error.message }
         : { status: "persistence_error", message: error.message };
-    }
-    // Error observability only — surfaces acquireGraphToken()'s own message (e.g. "A Microsoft
-    // access token could not be acquired.") instead of collapsing it into the generic fallback
-    // below. No change to auth/token behavior: this class was always thrown by
-    // MicrosoftAuthController.acquireGraphToken() (lib/microsoft-auth.ts); it just wasn't
-    // classified here, so a real auth failure was previously indistinguishable from an unknown
-    // one.
-    if (error instanceof MicrosoftAuthenticationError) {
-      return { status: "network_error", message: error.message };
     }
     return { status: "network_error", message: "The DEV SharePoint data store could not be reached." };
   }

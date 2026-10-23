@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   PrototypeFallbackProvider,
   selectDataProvider,
@@ -40,6 +40,23 @@ import {
   type ProjectProvider,
   type ProjectResult,
 } from "../lib/project-provider";
+import { createBrowserMicrosoftAuthController, isSignInRequiredMessage } from "../lib/microsoft-auth";
+import { readDevMicrosoftConfig } from "../lib/microsoft-auth-config";
+import {
+  initialStorageNotice,
+  inspectCurrentMicrosoftSession,
+  resolveStorageNotice,
+  type StorageNotice,
+} from "../lib/microsoft-session";
+import {
+  clearWorkRecordCheckpointForDraft,
+  getCheckpointStorage,
+  removeWorkRecordCheckpoint,
+  resolveCheckpointRecovery,
+  saveWorkRecordCheckpoint,
+  type RecoveryResolution,
+  type WorkRecordCheckpoint,
+} from "../lib/work-record-draft-checkpoint";
 import { deriveReportingDays } from "../lib/reporting";
 import ContactFormModal, { CONTACT_STATUS_LABELS, emptyContactDraft } from "./ContactFormModal";
 import ContactImport from "./ContactImport";
@@ -49,6 +66,7 @@ import MeetingNotes from "./MeetingNotes";
 import OrganizationFormModal, { emptyOrganizationDraft, ORGANIZATION_TYPE_LABELS } from "./OrganizationFormModal";
 import ProjectFormModal, { emptyProjectDraft } from "./ProjectFormModal";
 import VoiceIntelligence from "./VoiceIntelligence";
+import WorkRecordRecoveryBanner, { type RecoveryPrompt } from "./WorkRecordRecoveryBanner";
 
 type View = "home" | "today" | "history" | "projects" | "contacts" | "organizations" | "orbit" | "inbox" | "voice" | "meeting";
 const navItems: [View, string, string][] = [
@@ -144,6 +162,20 @@ export default function IUWorkTracker({
   const [references, setReferences] = useState<ReferenceData | null>(null);
   const [loading, setLoading] = useState(true);
   const [storageMode, setStorageMode] = useState<ActiveProviderKind>("memory");
+  // Patch 9A — why the app is (or is not) on SharePoint. Never describes a failed authenticated
+  // load as an ordinary Preview session; see lib/microsoft-session.ts.
+  const [storageNotice, setStorageNotice] = useState<StorageNotice>(() =>
+    initialStorageNotice(readDevMicrosoftConfig().status === "enabled"),
+  );
+  // Patch 9A (Option B) — Work Record draft recovery across a Microsoft re-sign-in. See
+  // lib/work-record-draft-checkpoint.ts: the draft is set aside in tab-scoped sessionStorage just
+  // before the user-initiated sign-in redirect and restored (for review, never auto-saved) after.
+  const [recoveryPrompt, setRecoveryPrompt] = useState<RecoveryPrompt | null>(null);
+  const [restoredNotice, setRestoredNotice] = useState(false);
+  const [reauthenticating, setReauthenticating] = useState(false);
+  const [reauthError, setReauthError] = useState("");
+  const reauthenticatingRef = useRef(false);
+  const loggingRef = useRef(false);
   const [logging, setLogging] = useState(false);
   const [draft, setDraft] = useState<WorkRecord>(emptyRecord);
   const [step, setStep] = useState(1);
@@ -404,13 +436,20 @@ export default function IUWorkTracker({
           source.getWorkRecords(), source.getProjects(), source.getOrganizations(), source.getContacts(), source.getCategories(),
           source.getDeliverables(), source.getReportingConfig(), source.getSystemSettings(),
         ]);
-        if (result.status !== "success") throw new Error(result.status);
+        if (result.status !== "success") {
+          throw new Error(
+            result.status === "network_error" || result.status === "persistence_error" || result.status === "conflict"
+              ? result.message
+              : "The stored work records could not be read.",
+          );
+        }
         if (live) {
           setRecords(result.value);
           setReferences({ projects, organizations, contacts, categories, deliverables, reportingConfig, settings });
         }
       };
       let kind: ActiveProviderKind = "memory";
+      let loadFailureMessage: string | null = null;
       try {
         if (!provider.current) {
           const selected = await selectDataProvider();
@@ -426,12 +465,13 @@ export default function IUWorkTracker({
         provider.current.setDurableContacts(contactRecordsRef.current);
         provider.current.setDurableOrganizations(organizationRecordsRef.current);
         await loadFrom(provider.current);
-      } catch {
+      } catch (error) {
         // Selecting or loading from the active provider failed (including a SharePoint
         // initialization failure). Fall back to the safe in-memory prototype without
         // touching whatever the failed provider holds. This is the same non-durable
         // "memory" kind selectDataProvider() itself returns when there is no signed-in
         // Microsoft session — there is no separate durable fallback to distinguish it from.
+        loadFailureMessage = error instanceof Error ? error.message : "The data store could not be loaded.";
         const fallback = new PrototypeFallbackProvider();
         provider.current = fallback;
         kind = "memory";
@@ -441,6 +481,13 @@ export default function IUWorkTracker({
           setStorageMode(kind);
           setLoading(false);
         }
+        // Explain WHY we are not on SharePoint (signed out, sign-in expired, authentication
+        // failed, several accounts, or SharePoint unavailable). Never rejects; no redirect.
+        if (kind === "memory") {
+          void resolveStorageNotice(loadFailureMessage).then((notice) => {
+            if (live) setStorageNotice(notice);
+          });
+        }
       }
     };
     void load();
@@ -448,6 +495,62 @@ export default function IUWorkTracker({
       live = false;
     };
   }, []);
+  // Reopens a checkpointed draft in the wizard for REVIEW. Never saves it. The post-save callback
+  // the entry may originally have had (e.g. Inbox link-back) cannot survive a redirect and is not restored.
+  const restoreCheckpoint = useCallback((checkpoint: WorkRecordCheckpoint) => {
+    opener.current = null;
+    onSavedRef.current = null;
+    setDraft(structuredClone(checkpoint.draft));
+    setDraftBaseline(""); // always "changed", so closing still asks before discarding it
+    setStep(checkpoint.step);
+    setSaveError("");
+    setReauthError("");
+    setRestoredNotice(true);
+    setRecoveryPrompt(null);
+    setLogging(true);
+  }, []);
+
+  useEffect(() => {
+    loggingRef.current = logging;
+  }, [logging]);
+  useEffect(() => {
+    // Coming back from the browser's back button (bfcache) must not leave "Sign in again" disabled.
+    const onPageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      reauthenticatingRef.current = false;
+      setReauthenticating(false);
+    };
+    window.addEventListener("pageshow", onPageShow);
+    return () => window.removeEventListener("pageshow", onPageShow);
+  }, []);
+  useEffect(() => {
+    // Once the workspace has loaded, look for a Work Record draft that was set aside before a
+    // Microsoft re-sign-in. Free when there is none (a single sessionStorage read).
+    if (loading) return;
+    let live = true;
+    void resolveCheckpointRecovery(getCheckpointStorage(), inspectCurrentMicrosoftSession).then((resolution: RecoveryResolution) => {
+      if (!live || resolution.status === "none") return;
+      if (resolution.status === "discarded") {
+        setRecoveryPrompt({ kind: "unusable", reason: resolution.reason });
+        return;
+      }
+      const { checkpoint, decision } = resolution;
+      if (decision.kind === "restore") {
+        // Same signed-in account. Restore straight into the wizard — unless it is already in use.
+        if (loggingRef.current) setRecoveryPrompt({ kind: "ready", checkpoint });
+        else restoreCheckpoint(checkpoint);
+      } else if (decision.kind === "different-account") {
+        setRecoveryPrompt({ kind: "different-account", ownerLabel: decision.ownerLabel, currentLabel: decision.currentLabel });
+      } else if (decision.kind === "sign-in-needed") {
+        setRecoveryPrompt({ kind: "sign-in-needed", ownerLabel: decision.ownerLabel, reason: decision.reason });
+      } else {
+        setRecoveryPrompt({ kind: "unconfirmed", checkpoint });
+      }
+    });
+    return () => {
+      live = false;
+    };
+  }, [loading, restoreCheckpoint]);
   const today = todayIso();
   const todayRecords = records.filter(
     (record) => record.activityDate === today,
@@ -465,6 +568,8 @@ export default function IUWorkTracker({
     const next = record ? structuredClone(record) : emptyRecord();
     opener.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
     onSavedRef.current = onSaved ?? null;
+    setRestoredNotice(false);
+    setReauthError("");
     setDraft(next);
     setDraftBaseline(JSON.stringify(next));
     setStep(1);
@@ -509,6 +614,9 @@ export default function IUWorkTracker({
         return;
       }
       const saved = result.value;
+      // The entry is saved: its safe copy (if one was set aside for a re-sign-in) is no longer needed.
+      clearWorkRecordCheckpointForDraft(getCheckpointStorage(), pending.appId);
+      setRestoredNotice(false);
       setRecords((current) =>
         [saved, ...current.filter((item) => item.appId !== saved.appId)].sort(
           (a, b) => b.activityDate.localeCompare(a.activityDate),
@@ -536,8 +644,68 @@ export default function IUWorkTracker({
   const requestClose = () => {
     const dirty = JSON.stringify(draft) !== draftBaseline;
     if (dirty && !window.confirm("Discard the changes in this work entry?")) return;
+    // The human chose to discard this entry, so any safe copy of IT goes too (never another draft's).
+    clearWorkRecordCheckpointForDraft(getCheckpointStorage(), draft.appId);
+    setRestoredNotice(false);
+    setReauthError("");
     onSavedRef.current = null;
     setLogging(false);
+  };
+
+  // Patch 9A — "Sign in again" from inside the wizard after a save failed because the Microsoft
+  // sign-in expired. The wizard (and the unsaved entry) stays exactly as it is; the entry is first
+  // copied to the checkpoint — if that copy cannot be made we do NOT redirect — and only then
+  // does the existing, single-flight, user-initiated sign-in start. Never submits anything.
+  const reauthenticate = async () => {
+    if (reauthenticatingRef.current) return; // one redirect attempt per click burst
+    const config = readDevMicrosoftConfig();
+    if (config.status !== "enabled") return;
+    reauthenticatingRef.current = true;
+    setReauthenticating(true);
+    setReauthError("");
+    const controller = createBrowserMicrosoftAuthController(config.value, window.location.origin);
+    let account = null;
+    try {
+      account = await controller.initialize();
+    } catch {
+      account = null; // identity unknown → recovery will require an explicit decision
+    }
+    const kept = saveWorkRecordCheckpoint(getCheckpointStorage(), {
+      accountId: account?.homeAccountId ?? null,
+      accountLabel: account?.username ?? null,
+      step,
+      draft,
+    });
+    if (!kept) {
+      reauthenticatingRef.current = false;
+      setReauthenticating(false);
+      setReauthError(
+        "A safe copy of this entry could not be kept in this browser, so sign-in was not started. Copy your notes somewhere safe, then try again.",
+      );
+      return;
+    }
+    try {
+      await controller.signIn(account);
+      // The browser is now leaving for Microsoft; stay "busy" so a second click cannot start another redirect.
+    } catch (error) {
+      reauthenticatingRef.current = false;
+      setReauthenticating(false);
+      setReauthError(
+        `${error instanceof Error ? error.message : "Microsoft sign-in could not be started."} Your entry is still open, and a safe copy is kept in this tab.`,
+      );
+    }
+  };
+
+  const handleRestorePrompt = (checkpoint: WorkRecordCheckpoint) => {
+    // Never replace an entry that is being worked on without the human saying so.
+    if (loggingRef.current && JSON.stringify(draft) !== draftBaseline && !window.confirm("Replace the entry you are working on with the saved unfinished entry?")) return;
+    restoreCheckpoint(checkpoint);
+  };
+
+  const handleDiscardPrompt = () => {
+    if (!window.confirm("Discard the saved unfinished work entry? This cannot be undone.")) return;
+    removeWorkRecordCheckpoint(getCheckpointStorage());
+    setRecoveryPrompt(null);
   };
   return (
     <>
@@ -546,10 +714,20 @@ export default function IUWorkTracker({
       <div className="os-body">
         <SideNav view={view} setView={setView} onLog={() => openLog()} />
         <section className="screen" aria-live="polite">
+          {recoveryPrompt && (
+            <WorkRecordRecoveryBanner
+              prompt={recoveryPrompt}
+              onRestore={handleRestorePrompt}
+              onDiscard={handleDiscardPrompt}
+              onDismiss={() => setRecoveryPrompt(null)}
+            />
+          )}
           {storageMode === "memory" && (
-            <div className="storage-banner">
-              <span>Preview mode</span> Changes in this session are not saved. Sign in
-              with Microsoft (top right) to connect SharePoint and save durably.
+            <div
+              className={`storage-banner${storageNotice.tone === "attention" ? " attention" : ""}`}
+              role={storageNotice.tone === "attention" ? "alert" : undefined}
+            >
+              <span>{storageNotice.label}</span> {storageNotice.message}
             </div>
           )}
           {loading || !effectiveReferences ? (
@@ -653,7 +831,11 @@ export default function IUWorkTracker({
       <footer className="os-status">
         <span>
           <i />{" "}
-          {storageMode === "sharepoint" ? "SharePoint DEV connected" : "Preview session active"}
+          {storageMode === "sharepoint"
+            ? "SharePoint DEV connected"
+            : storageNotice.tone === "attention"
+              ? "Preview session active — SharePoint not connected"
+              : "Preview session active"}
         </span>
         <span>Log it once. Use it everywhere.</span>
       </footer>
@@ -669,6 +851,10 @@ export default function IUWorkTracker({
           save={save}
           saving={saving}
           error={saveError}
+          notice={restoredNotice}
+          onReauthenticate={readDevMicrosoftConfig().status === "enabled" ? () => void reauthenticate() : undefined}
+          reauthenticating={reauthenticating}
+          reauthError={reauthError}
           references={effectiveReferences}
           returnFocusRef={opener}
         />
@@ -1679,6 +1865,10 @@ function LogWizard({
   save,
   saving,
   error,
+  notice,
+  onReauthenticate,
+  reauthenticating,
+  reauthError,
   references,
   returnFocusRef,
 }: {
@@ -1694,6 +1884,12 @@ function LogWizard({
   save: (another?: boolean) => void;
   saving: boolean;
   error: string;
+  /** True right after a draft was restored following a Microsoft re-sign-in. */
+  notice: boolean;
+  /** Present only when Microsoft sign-in is available; starts the checkpoint-then-sign-in flow. */
+  onReauthenticate?: () => void;
+  reauthenticating: boolean;
+  reauthError: string;
   references: ReferenceData;
   returnFocusRef: React.RefObject<HTMLElement | null>;
 }) {
@@ -2191,9 +2387,23 @@ function LogWizard({
             </div>
           )}
         </div>
+        {notice && (
+          <div className="form-notice" role="status">
+            Restored after sign-in. Review your entry, then save it when you are ready — nothing has been saved yet.
+          </div>
+        )}
         {error && (
           <div className="form-error" role="alert">
             {error}
+            {onReauthenticate && isSignInRequiredMessage(error) && (
+              <div className="form-error-action">
+                <span>Your entry stays open, and a safe copy is kept in this tab while you sign in.</span>
+                <button type="button" className="secondary-button" onClick={onReauthenticate} disabled={reauthenticating}>
+                  {reauthenticating ? "Redirecting to Microsoft…" : "Sign in again"}
+                </button>
+              </div>
+            )}
+            {reauthError && <div className="form-error-action">{reauthError}</div>}
           </div>
         )}
         <footer className="log-footer">

@@ -150,8 +150,10 @@ const msalConfig = {
     postLogoutRedirectUri: window.location.origin,
   },
   cache: {
-    cacheLocation: "sessionStorage",
-    storeAuthStateInCookie: false,
+    // Patch 9A: MSAL's supported localStorage cache (see §13). Historical note: this plan
+    // originally specified "sessionStorage" and `storeAuthStateInCookie: false`; MSAL 5 no
+    // longer accepts the latter, and the shipped configuration is exactly `cacheLocation` alone.
+    cacheLocation: "localStorage",
   },
 };
 ```
@@ -230,16 +232,28 @@ The Graph access token must not be sent to `/api/records` and treated as an IU W
 
 ## 13. Token cache and storage behavior
 
-Use `sessionStorage` for IU Work Tracker DEV.
+> **Patch 9A (supersedes the original `sessionStorage` decision).** This section originally required `sessionStorage` as a deliberate hardening of MAC's `localStorage` choice. Patch 9A reverses that, with explicit approval, so that Microsoft sign-in survives a refresh, a new tab, and a closed tab. The tradeoffs below are accepted knowingly; read them before relaxing or extending this policy.
 
-This intentionally hardens MAC's `localStorage` choice:
+Use MSAL's supported **`localStorage`** cache for IU Work Tracker DEV (`cache: { cacheLocation: "localStorage" }` — nothing else is configured).
 
-- Authentication state survives page reloads in the same browser tab/session.
-- It does not intentionally persist across browser restarts.
-- It avoids MAC's cross-session local-storage persistence.
-- It still requires strict XSS prevention because same-origin script can invoke MSAL even when storage persistence is shorter.
+**What it does**
 
-Set `storeAuthStateInCookie: false`. Do not create a separate custom token store. Do not copy tokens into application state, logs, D1, SharePoint, localStorage, cookies, or environment variables.
+- Authentication state survives page reloads, **new tabs, and closed tabs** in the same browser session, and is shared between tabs (MSAL syncs the cache across tabs with a `BroadcastChannel`).
+- MSAL v5 encrypts what it caches in `localStorage` (AES-GCM) with a key it generates and keeps in a **session cookie** (`msal.cache.encryption`, expiry "end of the browser session"). Data encrypted with a different key is discarded. So the cache **ends when the browser session ends** — a full browser quit normally means signing in again. (A browser configured to restore the previous session, e.g. "continue where you left off", also restores session cookies, and the sign-in then survives.) This is MSAL's own cookie, not an application cookie; the application sets none.
+- **Sign out** (`logoutRedirect`) removes the account's cached entries. Clearing site data does too.
+
+**Security tradeoffs (accepted)**
+
+- Tokens now outlive the tab. With `sessionStorage` they ended when the tab closed; now an unattended, still-open browser session remains signed in until it ends, the sign-in expires at Entra, or the user signs out. **On a shared or unmanaged computer, use Sign out.**
+- The encryption protects the cache **at rest** (profile files, other processes, other origins). It does **not** protect against script running on our own origin: the key cookie is readable by same-origin JavaScript, so a cross-site-scripting flaw could read and decrypt the cache. This was also true of `sessionStorage` (same-origin script can always call MSAL); the difference is a longer exposure window. Strict XSS prevention — pinned dependencies, a strict CSP, no untrusted HTML — remains mandatory.
+- Microsoft's own controls are unchanged and still decide how long a sign-in lasts: SPA refresh tokens are capped at **24 hours** by Entra, so a daily sign-in happens regardless of cache location, and Conditional Access / sign-in-frequency / MFA policies may require sooner. The app never bypasses them.
+- MSAL v5's encrypted cache needs a **secure context with WebCrypto** (HTTPS, or `localhost`). The deployed app and local development both qualify.
+
+**Unchanged rules**
+
+- Do not create a separate custom token store. Do not copy access tokens, refresh tokens, ID tokens, authorization codes, or serialized MSAL caches into application state, logs, D1, SharePoint, application-defined localStorage keys, application-defined cookies, or environment variables. The application never reads or writes the `msal.*` keys itself (a test asserts this).
+- Do not store passwords. Do not remember a username/login hint in application storage (the "SSO bounce on startup" option was considered and explicitly **not** implemented).
+- Scopes stay exactly `User.Read` and `Sites.ReadWrite.All`.
 
 See [MSAL Browser caching options](https://learn.microsoft.com/en-us/entra/msal/javascript/browser/caching).
 
@@ -255,15 +269,22 @@ Do not implement a refresh timer, store a refresh token, or call the token endpo
 
 ## 15. Interactive fallback
 
-If `acquireTokenSilent()` throws `InteractionRequiredAuthError`, call:
+> **Patch 9A (supersedes the original automatic-redirect behavior).** This section originally had the app call `acquireTokenRedirect` itself when `acquireTokenSilent()` threw `InteractionRequiredAuthError`. That redirected automatically — on page load, and mid-save, where it discards unsaved work — and could loop if a silent renewal kept needing interaction right after an interactive sign-in.
 
-```text
-acquireTokenRedirect({ scopes, account })
-```
+If `acquireTokenSilent()` throws `InteractionRequiredAuthError`, `acquireGraphToken()` now throws `InteractionRequiredError` ("Microsoft sign-in has expired…") and **does not redirect**. The pending provider operation stops (never a `fetch` with a missing token), the UI shows **Sign-in required** (account menu and storage banner), and the human chooses when to leave the page with **Sign in with Microsoft**.
 
-Then stop the pending provider operation. Do not continue a `fetch` with a null or missing token. This corrects the inspected MAC source's `Bearer null` fall-through risk.
+That click is the only way an interactive redirect starts. It is single-flight (`MicrosoftAuthController.signIn`): concurrent requests share one redirect, and MSAL's own "interaction already in progress" lock is treated as "a redirect is already underway". With a cached account it re-authenticates that account (`acquireTokenRedirect`); with none it opens the account chooser (`loginRedirect`, `prompt: "select_account"`). Non-interaction failures become safe authentication errors, never redirects.
 
-Do not redirect for every silent failure indiscriminately. Non-interaction failures should become safe authentication/network errors, not redirect loops.
+### Work Record draft recovery across the sign-in redirect (Patch 9A)
+
+A save can fail because the sign-in expired while a Work Record is open in the wizard. While the wizard is open the rest of the app is inert, so the header's Sign in is unreachable, and signing in is a full-page redirect that would discard the entry. So the wizard shows **Sign in again** next to that specific error (and only that error). Clicking it:
+
+1. Writes a **checkpoint** — the Work Record draft, the wizard step, and which account it belongs to (MSAL `homeAccountId` + username) — to `sessionStorage` key `iu-work-tracker.work-record-draft-checkpoint.v1`. **If the write fails it does not redirect**; the entry stays open and the user is told.
+2. Starts the normal, single-flight, user-initiated sign-in (§15). Nothing else changes about how sign-in works.
+
+After sign-in, if the signed-in account is the one that owns the checkpoint, the draft reopens in the wizard at the saved step **for review — it is never submitted automatically**. In every other case it is not restored on its own: a different account, a signed-out/expired/failed session, several cached accounts, or an owner that cannot be confirmed all produce an explanatory prompt (an unconfirmed owner gets an explicit Restore / Discard choice; a different account is never offered Restore). A wizard already in use is never overwritten without confirmation.
+
+What is and is not stored: only the user's draft content (work notes they typed), the step, and the account identifier/username. **No access, refresh, or ID tokens, passwords, or MSAL cache content.** `sessionStorage` is tab-scoped, so closing the tab ends it; in addition a checkpoint expires after **12 hours**, and a damaged, expired, or outdated-version checkpoint is removed and reported rather than restored. It is removed only after that draft is saved successfully or the user explicitly discards it. The draft is user content in browser storage — the same exposure as the Voice working session (Patch 7.2) — and is never sent to SharePoint, Graph, or any AI service.
 
 ## 16. Sign-in and sign-out flow
 
@@ -314,7 +335,7 @@ Keep these as code constants rather than mutable environment variables:
 | Graph scopes | `User.Read`, `Sites.ReadWrite.All` |
 | Redirect URI | `window.location.origin` |
 | Post-logout URI | `window.location.origin` |
-| Cache | `sessionStorage` |
+| Cache | `localStorage` (MSAL-managed, encrypted; see §13) |
 
 Vinext supports browser-exposed `NEXT_PUBLIC_*` values. Anything with that prefix is included in client output and must be treated as public. Redirect origins are derived rather than configured so one build can use the exact current local or deployed origin.
 
@@ -468,7 +489,7 @@ The inspected working implementation offers no zero-impact Graph operation that 
 6. Keep the Sites deployment owner-only during initial authentication verification.
 7. Do not reuse MAC's `IEP_Users2` browser-side role scan as the security boundary.
 8. Do not create a client secret.
-9. Keep tokens in MSAL `sessionStorage`; never manually persist or log them.
+9. Keep tokens in MSAL's own `localStorage` cache (Patch 9A; originally `sessionStorage`); never manually persist or log them.
 10. Use a pinned package, strict CSP, and normal XSS protections before enabling real Graph tokens.
 11. Keep Microsoft Graph calls inside the future DEV-only `DelegatedSharePointDataProvider`; UI components do not call Graph directly.
 12. Preserve strict schema validation, `ProviderResult` mapping, pagination, and the approved `RecordVersion` plus ETag algorithm.

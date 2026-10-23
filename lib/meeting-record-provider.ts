@@ -1,7 +1,7 @@
 import type { AccountInfo } from "@azure/msal-browser";
 import {
   createBrowserMicrosoftAuthController,
-  InteractiveRedirectStartedError,
+  microsoftAuthErrorMessage,
   type MicrosoftAuthController,
 } from "./microsoft-auth";
 import { readDevMicrosoftConfig } from "./microsoft-auth-config";
@@ -156,9 +156,10 @@ export class DelegatedSharePointMeetingRecordProvider implements MeetingRecordPr
   }
 
   private toErrorResult<T>(error: unknown): MeetingRecordResult<T> {
-    if (error instanceof InteractiveRedirectStartedError) {
-      return { status: "network_error", message: "Microsoft sign-in confirmation is required. Finish signing in, then try again." };
-    }
+    // Patch 9A — every Microsoft authentication problem (expired sign-in, failed token, redirect
+    // pending) reports its own useful message instead of collapsing into the generic fallback.
+    const authMessage = microsoftAuthErrorMessage(error);
+    if (authMessage) return { status: "network_error", message: authMessage };
     if (error instanceof SharePointMeetingRecordsError) {
       return error.kind === "auth"
         ? { status: "network_error", message: error.message }

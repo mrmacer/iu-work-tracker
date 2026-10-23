@@ -114,8 +114,14 @@ export function createMsalConfiguration(
       redirectUri: `${origin}/`,
       postLogoutRedirectUri: `${origin}/`,
     },
+    // Patch 9A — MSAL's own supported localStorage cache, so authentication survives a refresh,
+    // a new tab, and a closed tab within the browser session. This is NOT custom token storage:
+    // MSAL v5 encrypts what it caches with a key held in a session cookie that is cleared when
+    // the browser session ends, so a full browser restart still means signing in again. See
+    // docs/DELEGATED_AUTH_SETUP.md §13 for the security tradeoffs (this reverses the earlier
+    // sessionStorage hardening).
     cache: {
-      cacheLocation: BrowserCacheLocation.SessionStorage,
+      cacheLocation: BrowserCacheLocation.LocalStorage,
     },
   };
 }
